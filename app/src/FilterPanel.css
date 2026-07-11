@@ -1,0 +1,103 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* Timeline content filter — a rounded popover matching the app card, anchored
+ * under the header filter button. Chips reuse `.g-chip` from Photos.css. */
+
+.fp {
+  position: absolute;
+  top: 58px;
+  left: 20px;
+  z-index: 860;
+  width: 320px;
+  max-width: calc(100vw - 40px);
+  padding: 14px 16px 16px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+.fp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.fp-title {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+.fp-reset {
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fp-reset:hover {
+  text-decoration: underline;
+}
+
+.fp-x {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.fp-x:hover {
+  background: var(--line);
+  color: var(--fg-primary);
+}
+
+/* Section label — uppercase and dim, like the Android filter sheet. */
+.fp-label {
+  margin: 0 0 9px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+
+.fp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fp-chips + .fp-label {
+  margin-top: 16px;
+}

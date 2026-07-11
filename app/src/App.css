@@ -1,0 +1,316 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, "Segoe UI", Avenir, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+/* Transparent so the rounded window corners show through (frameless window). */
+html,
+body {
+  background: transparent;
+}
+
+/* The app draws its own window: rounded, dark, custom title bar (Android palette). */
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg0);
+  color: var(--fg-primary);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--surface);
+}
+
+/* Custom title bar. */
+.titlebar {
+  height: 40px;
+  flex: 0 0 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 16px;
+  user-select: none;
+}
+
+.titlebar-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--fg-soft);
+}
+
+.titlebar-buttons {
+  display: flex;
+  height: 100%;
+}
+
+.win-btn {
+  width: 44px;
+  height: 40px;
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.win-btn:hover {
+  background: var(--line);
+  color: #fff;
+}
+
+.win-btn.close:hover {
+  background: var(--status-error);
+  color: #fff;
+}
+
+.app-content {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  overflow: auto;
+}
+
+/* ---- Login card ---- */
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2rem 1.75rem;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.login-title {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 700;
+  text-align: center;
+  color: var(--fg-primary);
+}
+
+.login-sub {
+  margin: 0.35rem 0 1.5rem;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+
+/* The account email shown read-only on the lock screen. */
+.lock-email {
+  margin: -0.75rem 0 1.25rem;
+  text-align: center;
+  color: var(--fg-primary);
+  font-size: 0.92rem;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+}
+
+.login-form input {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg0);
+  color: var(--fg-primary);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.login-form input:focus {
+  border-color: var(--accent);
+}
+
+.login-form button[type="submit"] {
+  margin-top: 0.25rem;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: white;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.login-form button[type="submit"]:hover {
+  filter: brightness(1.08);
+}
+
+.login-form button[type="submit"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.login-form button.link {
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.login-status {
+  margin: 1.1rem 0 0;
+  padding: 0.7rem 0.85rem;
+  border-radius: 10px;
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid rgba(var(--accent-rgb), 0.28);
+  color: var(--accent-soft);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  text-align: center;
+  word-break: break-word;
+}
+
+/* ---- Human verification (embedded Proton captcha) ---- */
+.login-card.wide {
+  max-width: 440px;
+}
+
+.captcha {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.captcha-hint {
+  margin: 0;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+}
+
+.captcha-frame {
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--page-bg);
+}
+
+.captcha button.link {
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* ---- Custom context menu (right-click) ---- */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 160px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.context-menu li {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.context-menu li:hover {
+  background: var(--accent-wash-strong);
+}
+
+.context-menu li.disabled {
+  color: var(--fg-mute);
+  cursor: default;
+}
+
+.context-menu li.disabled:hover {
+  background: transparent;
+}
+
+/* This is an app, not a web page: no text selection, no image dragging. */
+.app-shell {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.app-shell input,
+.app-shell textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+.app-shell img {
+  -webkit-user-drag: none;
+}
+
+/* ---- App logo in the title bar ---- */
+.titlebar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.titlebar-logo {
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  flex: 0 0 auto;
+}

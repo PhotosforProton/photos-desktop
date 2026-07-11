@@ -1,0 +1,262 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+.up-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+}
+
+/* Sized to the screen, never taller than it. */
+.up-panel {
+  width: min(720px, 82vw);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px 18px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+
+.up-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.up-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+.up-x {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.up-x:hover:not(:disabled) {
+  background: var(--line);
+  color: #fff;
+}
+.up-x:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ---- Drop zone ---- */
+.up-drop {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  padding: 38px 20px;
+  border-radius: 12px;
+  border: 1.5px dashed var(--surface-2);
+  background: var(--page-bg);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.up-drop.hot {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+.up-dropicon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: 20px;
+}
+.up-droptitle {
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.up-dropsub {
+  margin: 0;
+  max-width: 42ch;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+/* ---- Actions ---- */
+.up-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.up-btn {
+  padding: 9px 16px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.up-btn:hover {
+  filter: brightness(1.08);
+}
+.up-btn.ghost {
+  background: transparent;
+  border: 1px solid var(--surface-2);
+  color: var(--fg-dim);
+}
+.up-btn.ghost:hover {
+  color: var(--fg-primary);
+  filter: none;
+}
+
+/* ---- Progress ---- */
+.up-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.up-barfill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.2s ease;
+}
+.up-counts {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.up-dim {
+  color: var(--fg-mute);
+}
+.up-bad {
+  color: var(--error);
+}
+
+.up-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+}
+.up-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid rgba(var(--line-rgb), 0.04);
+}
+.up-item:last-child {
+  border-bottom: none;
+}
+.up-item.done {
+  color: var(--fg-primary);
+}
+.up-item.failed {
+  color: var(--error);
+}
+.up-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.up-album {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.16);
+}
+.up-state {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-mute);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.up-item.done .up-state {
+  color: var(--status-synced);
+}
+
+.up-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--error);
+}
+
+/* The scrollbar inside the list follows the app's own style. */
+.up-list::-webkit-scrollbar {
+  width: 8px;
+}
+.up-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.up-actions.center {
+  justify-content: center;
+  margin-top: 12px;
+}
+.up-spacer {
+  flex: 1 1 auto;
+}
+.up-link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+.up-link:hover {
+  filter: brightness(1.15);
+}
+.up-item.uploading .up-state {
+  color: var(--accent);
+}

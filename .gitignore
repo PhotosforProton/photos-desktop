@@ -1,0 +1,42 @@
+# ---- Dependencies ----
+node_modules/
+
+# ---- Rust build output (covers both app/ and setup/) ----
+**/target/
+**/*.rs.bk
+*.pdb
+
+# ---- Frontend build output (app/ and setup/) ----
+**/dist/
+
+# ---- Generated: the bundled sidecar + the copied Node runtime (~120 MB, reproducible) ----
+sidecar/build/
+app/src-tauri/binaries/
+
+# ---- Tauri generated capability schemas ----
+**/gen/schemas/
+
+# ---- Installer build artifacts (large, reproducible) ----
+setup/src-tauri/payload/*.zip
+*.exe
+*.nupkg
+
+# ---- Secrets / runtime data — never commit ----
+/.secrets
+.env
+.env.*
+*.pem
+*.key
+*.session.json
+vault.json
+session.enc
+
+# ---- Reference SDK clone (Proton's own code, not ours to redistribute) ----
+sdk/
+
+# ---- Editor / OS ----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.log
