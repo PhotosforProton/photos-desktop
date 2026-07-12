@@ -23,13 +23,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Titlebar } from "./Titlebar";
-import { Photos } from "./Photos";
-import { Lock } from "./Lock";
-import { rpc } from "./rpc";
-import { applyTheme, type ThemeMode } from "./theme";
-import { useT } from "./i18n";
-import "./App.css";
+import { Titlebar } from "./components/Titlebar";
+import { UpdateBanner } from "./components/UpdateBanner";
+import { Photos } from "./views/Photos";
+import { Lock } from "./views/Lock";
+import { rpc } from "./lib/rpc";
+import { applyTheme, type ThemeMode } from "./lib/theme";
+import { useT } from "./lib/i18n";
+import "./styles/App.css";
 
 type Phase = "credentials" | "twofa" | "captcha";
 type MenuState = { x: number; y: number } | null;
@@ -313,6 +314,7 @@ function App() {
   return (
     <div className="app-shell">
       <Titlebar />
+      <UpdateBanner />
 
       {restoring ? (
         <div className="app-content">

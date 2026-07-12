@@ -34,7 +34,39 @@ windows = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_Threading",
+  "Win32_System_Com",
+  # Convert a plain file back to a placeholder (CfConvertToPlaceholder) on a Win32
+  # handle. The cloud-filter crate only offers this through its oplock handle, which
+  # CfConvertToPlaceholder rejects with ERROR_INVALID_HANDLE, so we call it directly.
+  # (CfConvertToPlaceholder is gated behind Win32_System_IO — it takes an OVERLAPPED.)
+  "Win32_Storage_CloudFilters",
+  "Win32_System_IO",
 ] }
+# Registers the "Proton Photos" folder as a Windows Cloud Filter sync root so it
+# shows in the Explorer navigation pane (files-on-demand comes later).
+cloud-filter = "0.0.6"
+# cloud-filter's own windows version (0.58): we register the sync root directly
+# through it to set InSyncPolicy = PreserveInsyncForSyncEngine (a download-only
+# provider needs this so files stay in-sync and can be "freed up"); the crate's typed
+# builder cannot express it. Pinned to match the crate's version so the HSTRING types
+# unify with SyncRootId::as_hstring().
+windows058 = { package = "windows", version = "=0.58.0", features = [
+  "Foundation",
+  "Storage",
+  "Storage_Provider",
+  "Security_Cryptography",
+] }
+# Suspend the main window's WebView2 while the app sits in the tray, so it stops
+# holding ~200 MB of renderer memory in the background (state is kept; it resumes on
+# show). Tauri's `with_webview` hands us the controller; TrySuspend needs the raw
+# WebView2 COM interface. Pinned to Tauri's own version so the interface types unify.
+webview2-com = "0.38"
+# The `#[implement]` macro used for the TrySuspend completion handler expands to bare
+# `windows_core::` paths, so windows-core must be a direct dependency by that name. Same
+# version webview2-com-sys binds against, so the COM interface traits unify.
+windows-core = "0.61"
+# The "show in File Explorer" preference (HKCU), shared with the installer checkbox.
+winreg = "0.52"
 # Native file / folder picker for the upload dialog.
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }

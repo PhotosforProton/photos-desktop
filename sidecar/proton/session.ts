@@ -24,9 +24,10 @@
 // client. Holds state across the login -> 2FA -> browse steps.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { createWriteStream, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { createWriteStream, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { finished } from "node:stream/promises";
 import { WritableStream } from "node:stream/web";
 
 import { MemoryCache, ThumbnailType } from "@protontech/drive-sdk";
@@ -672,6 +673,96 @@ export class ProtonSession {
     return { base64: Buffer.concat(chunks).toString("base64"), mime };
   }
 
+  private mountUids: { uid: string; captureTime: number }[] | null = null;
+
+  /**
+   * One page of cloud photos as {uid, name, size, captureTime} for the Explorer
+   * mount. `offset === 0` (re)builds the lightweight uid list once (a single cheap
+   * timeline pass); later pages slice it. The claimed size (needed so hydration
+   * transfers exactly that many bytes) lives on the node revision, so `getNode` is
+   * per photo — paging lets the Rust host release the RPC lock between pages, so
+   * the app's thumbnails keep loading while the mount populates.
+   */
+  async listForMount(
+    offset: number,
+    limit: number,
+  ): Promise<{
+    items: { uid: string; name: string; size: number; captureTime: number }[];
+    total: number;
+  }> {
+    if (!this.photos) throw new Error("Not signed in");
+    if (offset === 0 || !this.mountUids) {
+      const picks: { uid: string; captureTime: number }[] = [];
+      for await (const item of this.photos.iterateTimeline()) {
+        const uid = (item as any).nodeUid ?? (item as any).uid;
+        if (!uid) continue;
+        const ct = (item as any).captureTime;
+        picks.push({ uid, captureTime: ct instanceof Date ? ct.getTime() : Number(ct) * 1000 });
+      }
+      this.mountUids = picks;
+    }
+
+    const items: { uid: string; name: string; size: number; captureTime: number }[] = [];
+    for (const p of this.mountUids.slice(offset, offset + limit)) {
+      try {
+        const n: any = await this.photos.getNode(p.uid);
+        const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+        const size = Number(revision?.claimedSize ?? 0);
+        if (size > 0) {
+          items.push({ uid: p.uid, name: nodeName(n) || p.uid, size, captureTime: p.captureTime });
+        }
+      } catch {
+        /* a node that vanished server-side is skipped */
+      }
+    }
+    return { items, total: this.mountUids.length };
+  }
+
+  /**
+   * Stream one file's decrypted bytes to a temp file on disk and return its path,
+   * for the host to transfer into the Explorer placeholder in small chunks. The full
+   * file is never resident in memory: buffering it (plus a base64 copy for the RPC)
+   * needed several times the file size at once, so a run of large videos starved the
+   * single-threaded sidecar and stalled the whole app. Streaming keeps memory flat,
+   * so there is also no size cap. The host deletes the temp file after the transfer.
+   */
+  async hydrateFile(uid: string): Promise<{ path: string; size: number }> {
+    if (!this.photos) throw new Error("Not signed in");
+    const dest = join(tmpdir(), `pfp-hyd-${randomUUID()}.bin`);
+    const downloader = await this.photos.getFileDownloader(uid);
+    const file = createWriteStream(dest);
+    let total = 0;
+    const stream = new WritableStream<Uint8Array>({
+      write(chunk) {
+        total += chunk.byteLength;
+        // Respect backpressure so a large file cannot balloon the write buffer.
+        if (!file.write(chunk)) {
+          return new Promise<void>((resolve) => file.once("drain", resolve));
+        }
+      },
+      abort() {
+        file.destroy();
+      },
+    });
+    try {
+      await downloader.downloadToStream(stream as any).completion();
+      // Close ourselves and wait for the flush; end(cb) cannot hang the way waiting
+      // on the SDK to call the stream's close() could (which froze the serial RPC).
+      await new Promise<void>((resolve, reject) => {
+        file.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      });
+    } catch (e) {
+      file.destroy();
+      try {
+        rmSync(dest, { force: true });
+      } catch {
+        /* a cleanup failure must not mask the original error */
+      }
+      throw e;
+    }
+    return { path: dest, size: total };
+  }
+
   /**
    * Download the originals for the given photos straight to a folder the user
    * picked. The decrypted files are written out and the app does not track them
@@ -694,19 +785,34 @@ export class ProtonSession {
         const file = createWriteStream(dest);
         const stream = new WritableStream<Uint8Array>({
           write(chunk) {
-            return new Promise<void>((resolve, reject) => {
-              file.write(chunk, (err) => (err ? reject(err) : resolve()));
-            });
-          },
-          close() {
-            file.end();
+            // Synchronous write like the video path; respect backpressure so a large
+            // file does not balloon the buffer.
+            if (!file.write(chunk)) {
+              return new Promise<void>((resolve) => file.once("drain", resolve));
+            }
           },
           abort() {
             file.destroy();
           },
         });
         await downloader.downloadToStream(stream as any).completion();
-        await finished(file);
+        // Close the file ourselves and wait for the flush. Waiting on the SDK to
+        // call the stream's close() (as the old code did via finished()) could hang
+        // forever and, since RPC is serialized, froze the whole app; end(cb) cannot.
+        await new Promise<void>((resolve, reject) => {
+          file.end((err?: Error | null) => (err ? reject(err) : resolve()));
+        });
+        // Stamp the file with the photo's original capture time so Explorer shows
+        // the real date, not the moment it was downloaded.
+        const whenMs =
+          toMillis((node as any).photo?.captureTime) || toMillis((node as any).creationTime);
+        if (whenMs > 0) {
+          try {
+            utimesSync(dest, new Date(whenMs), new Date(whenMs));
+          } catch {
+            /* a timestamp failure must not fail the download */
+          }
+        }
         out.push({ uid, ok: true, name });
       } catch (e) {
         if (dest) {
@@ -777,6 +883,31 @@ export class ProtonSession {
       out.push({ uid: (item as any).nodeUid, captureTime: toMillis((item as any).captureTime) });
     }
     out.sort((a, b) => b.captureTime - a.captureTime);
+    return out;
+  }
+
+  /**
+   * Albums with their member photo uids, for the Explorer mount's `Albums\`
+   * subfolders. Names and sizes are not resolved here — the mount reuses the
+   * metadata gathered in the main photo pass — so this stays a cheap membership
+   * walk (iterateAlbums, then iterateAlbum per album).
+   */
+  async listAlbumsForMount(): Promise<{ uid: string; name: string; uids: string[] }[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    const out: { uid: string; name: string; uids: string[] }[] = [];
+    for await (const albumNode of this.photos.iterateAlbums()) {
+      const albumUid = (albumNode as any).uid;
+      const uids: string[] = [];
+      try {
+        for await (const item of this.photos.iterateAlbum(albumUid)) {
+          const u = (item as any).nodeUid;
+          if (u) uids.push(u);
+        }
+      } catch (e) {
+        process.stderr.write(`[sidecar] iterateAlbum(${albumUid}) failed: ${(e as Error).message}\n`);
+      }
+      out.push({ uid: albumUid, name: nodeName(albumNode) || "Album", uids });
+    }
     return out;
   }
 

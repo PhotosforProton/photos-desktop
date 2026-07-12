@@ -24,3 +24,7 @@ mslnk = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Unregister the "Proton Photos" cloud sync root on uninstall (the API call notifies
+# the shell so Explorer drops the nav-pane entry; a raw registry delete does not).
+cloud-filter = "0.0.6"
+windows = { version = "0.61", features = ["Win32_System_Com"] }

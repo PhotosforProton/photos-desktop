@@ -34,6 +34,7 @@ import { VERSION } from "@protontech/drive-sdk";
 import { session } from "./proton/session.ts";
 import { initStore } from "./proton/store.ts";
 import { scrubSecrets } from "./scrub.ts";
+import { checkUpdate, downloadUpdate } from "./update.ts";
 
 // Two hard rules for the sidecar's output. (1) stdout carries ONLY JSON-RPC
 // responses; a stray write corrupts the channel and knocks the sidecar offline.
@@ -99,10 +100,13 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getPreview: (p) => session.getPreview(p.uid),
   getVideo: (p) => session.getVideo(p.uid),
   downloadOriginals: (p) => session.downloadOriginals(p.uids, p.destDir),
+  listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
+  hydrateFile: (p) => session.hydrateFile(p.uid),
   heapStats: () => process.memoryUsage(),
   getAlbums: () => session.getAlbums(),
   getAlbumPhotos: (p) => session.getAlbumPhotos(p.uid),
   getAlbumPhotoUids: () => session.getAlbumPhotoUids(),
+  listAlbumsForMount: () => session.listAlbumsForMount(),
   getShared: (p) => session.getShared(!!p.withMe),
   getMetadata: (p) => session.getMetadata(p.uids),
   startUpload: (p) => session.startUpload(p.paths),
@@ -117,6 +121,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getAccountInfo: () => session.getAccountInfo(),
   signOut: () => session.signOut(),
   getPersistable: () => session.getPersistable(),
+  checkUpdate: () => checkUpdate(),
+  downloadUpdate: (p) => downloadUpdate(p.url, p.sha256),
 };
 
 async function handle(req: Request): Promise<unknown> {

@@ -208,11 +208,11 @@ fn write_uninstall_entry(_: &Path, _: &Path, _: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn install(dir: String, desktop: bool, start_menu: bool) -> Result<(), String> {
-    install_impl(dir, desktop, start_menu)
+fn install(dir: String, desktop: bool, start_menu: bool, network_drive: bool) -> Result<(), String> {
+    install_impl(dir, desktop, start_menu, network_drive)
 }
 
-fn install_impl(dir: String, desktop: bool, start_menu: bool) -> Result<(), String> {
+fn install_impl(dir: String, desktop: bool, start_menu: bool, network_drive: bool) -> Result<(), String> {
     let target = PathBuf::from(&dir);
     fs::create_dir_all(&target).map_err(|e| format!("create {dir}: {e}"))?;
     extract_payload(&target)?;
@@ -230,7 +230,46 @@ fn install_impl(dir: String, desktop: bool, start_menu: bool) -> Result<(), Stri
         make_shortcut(&start_menu_dir().join(format!("{APP_NAME}.lnk")), &app_exe)?;
     }
     write_uninstall_entry(&target, &uninstaller, &app_exe)?;
+    set_show_in_explorer_pref(network_drive);
     Ok(())
+}
+
+/// Update an existing install in place: replace its files with this (newer) exe's
+/// payload and relaunch. Invoked as `<downloaded-setup>.exe --update` by the running
+/// app, which quits first so its files unlock. Shortcuts, data and prefs are kept.
+#[cfg(windows)]
+fn update_impl() -> Result<(), String> {
+    let loc = read_install_location().ok_or_else(|| "no existing installation to update".to_string())?;
+    let install = PathBuf::from(&loc);
+    // The app launched us then quit; make sure nothing under the folder still holds
+    // a file, then overwrite the payload, retrying while app.exe finishes closing.
+    kill_under_dir(&install);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    let mut extracted = extract_payload(&install);
+    let mut tries = 0;
+    while extracted.is_err() && tries < 5 {
+        tries += 1;
+        kill_under_dir(&install);
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        extracted = extract_payload(&install);
+    }
+    extracted?;
+    // Refresh the uninstaller (this newer exe) and the Add/Remove-Programs entry.
+    let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let uninstaller = install.join("uninstall.exe");
+    let _ = fs::copy(&self_exe, &uninstaller);
+    let app_exe = install.join("app.exe");
+    let _ = write_uninstall_entry(&install, &uninstaller, &app_exe);
+    // Relaunch the updated app.
+    std::process::Command::new(&app_exe)
+        .current_dir(&install)
+        .spawn()
+        .map_err(|e| format!("relaunch: {e}"))?;
+    Ok(())
+}
+#[cfg(not(windows))]
+fn update_impl() -> Result<(), String> {
+    Err("update is Windows-only".into())
 }
 
 #[tauri::command]
@@ -253,6 +292,63 @@ fn remove_uninstall_entry() {
 }
 #[cfg(not(windows))]
 fn remove_uninstall_entry() {}
+
+/// Remove the Explorer "Proton Photos" cloud-provider (sync root) registration so
+/// no ghost nav-pane entry is left behind. The proper API unregister also notifies
+/// the shell to drop the entry — a raw registry delete does not, which is why it
+/// lingered. The folder and the user's downloaded files are intentionally kept.
+#[cfg(windows)]
+fn remove_sync_root_registration() {
+    // Proper unregister on a fresh COM-STA thread (the main thread's apartment may
+    // differ); join so it finishes before we return.
+    let _ = std::thread::spawn(|| {
+        use cloud_filter::root::{SecurityId, SyncRootIdBuilder};
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        if let Ok(sid) = SecurityId::current_user() {
+            let id = SyncRootIdBuilder::new("ProtonPhotos").user_security_id(sid).build();
+            if id.is_registered().unwrap_or(false) {
+                let _ = id.unregister();
+            }
+        }
+    })
+    .join();
+
+    // Fallback: delete any leftover SyncRootManager\ProtonPhotos!* keys directly.
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let path = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SyncRootManager";
+    if let Ok(mgr) = hkcu.open_subkey_with_flags(path, KEY_READ | KEY_WRITE) {
+        let ours: Vec<String> = mgr
+            .enum_keys()
+            .filter_map(|k| k.ok())
+            .filter(|k| k.starts_with("ProtonPhotos!"))
+            .collect();
+        for name in ours {
+            let _ = mgr.delete_subkey_all(&name);
+        }
+    }
+}
+#[cfg(not(windows))]
+fn remove_sync_root_registration() {}
+
+/// Write the "show in File Explorer" preference the app reads at startup (a shared
+/// HKCU key with the app's Settings toggle).
+#[cfg(windows)]
+fn set_show_in_explorer_pref(enabled: bool) {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    if let Ok((key, _)) =
+        RegKey::predef(HKEY_CURRENT_USER).create_subkey("Software\\PhotosForProton")
+    {
+        let _ = key.set_value("ShowInExplorer", &u32::from(enabled));
+    }
+}
+#[cfg(not(windows))]
+fn set_show_in_explorer_pref(_: bool) {}
 
 // PowerShell run by the uninstaller. These are templates (not `format!`) so the
 // many literal `{ }` of PowerShell stay out of Rust's brace-escaping; `__DIR__`
@@ -467,6 +563,9 @@ fn uninstall_impl(install: &Path) -> Result<(), String> {
     let _ = fs::remove_file(start_menu_dir().join(format!("{APP_NAME}.lnk")));
     // Add/Remove Programs entry.
     remove_uninstall_entry();
+    // The Explorer "Proton Photos" nav-pane registration (the folder + the user's
+    // downloaded files are kept, as OneDrive does on uninstall).
+    remove_sync_root_registration();
     // Legacy data location (pre one-folder builds).
     let _ = fs::remove_dir_all(data_dir());
     // Remove the bulk NOW, synchronously: app.exe, the sidecar, and all the
@@ -499,11 +598,18 @@ pub fn run() {
     //   setup.exe --silent            install to the default location + shortcuts
     //   uninstall.exe --uninstall --silent   remove everything, no prompt
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--update") {
+        if let Err(e) = update_impl() {
+            eprintln!("update error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--silent") {
         let result = if is_uninstall() {
             self_install_dir().and_then(|d| uninstall_impl(&d))
         } else {
-            install_impl(default_dir_impl(), true, true)
+            install_impl(default_dir_impl(), true, true, true)
         };
         if let Err(e) = result {
             eprintln!("setup error: {e}");

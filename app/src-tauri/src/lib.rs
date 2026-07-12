@@ -24,6 +24,7 @@
 // the official Proton Drive SDK), and relays newline-delimited JSON-RPC to it,
 // one request at a time.
 
+mod cloud_mount;
 mod secure_store;
 
 use std::io::{BufRead, BufReader, Write};
@@ -116,7 +117,7 @@ fn locate_packaged_sidecar(app: &AppHandle) -> Result<(std::path::PathBuf, std::
 }
 
 /// Append a host-side line to the same log the sidecar's stderr goes to.
-fn note(app: &AppHandle, message: &str) {
+pub(crate) fn note(app: &AppHandle, message: &str) {
     let Ok(dir) = secure_store::app_dir(app) else { return };
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -257,6 +258,43 @@ fn rpc_blocking(
         *guard = None;
     }
     result
+}
+
+/// Call a sidecar method from Rust (e.g. the Cloud Filter mount's hydration and
+/// populate paths), unwrapping the `{ok,result,error}` envelope.
+#[cfg(windows)]
+pub(crate) fn sidecar_rpc(
+    app: &AppHandle,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let shared = app.state::<SharedSidecar>().inner().clone();
+    let resp = rpc_blocking(app, &shared, method.to_string(), params)?;
+    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(resp.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    } else {
+        Err(resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sidecar error")
+            .to_string())
+    }
+}
+
+/// Download + decrypt one file through the sidecar to a temp file on disk, and
+/// return its path and byte count. The host streams that file into the Explorer
+/// placeholder in small chunks and deletes it, so neither process ever holds the
+/// whole file (a large video otherwise needed several times its size resident at
+/// once, which stalled the app). The caller owns the temp file and must remove it.
+#[cfg(windows)]
+pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::PathBuf, u64), String> {
+    let result = sidecar_rpc(app, "hydrateFile", serde_json::json!({ "uid": uid }))?;
+    let path = result
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("hydrateFile returned no path")?;
+    let size = result.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    Ok((std::path::PathBuf::from(path), size))
 }
 
 #[tauri::command]
@@ -464,8 +502,65 @@ mod tray_dismiss {
     }
 }
 
+/// Suspend / resume the main window's WebView2 so it does not hold its full renderer
+/// memory (~200 MB) while the app is only in the tray. Suspending keeps all page
+/// state; the view resumes instantly on show. Best-effort: any failure just leaves the
+/// memory as-is. Windows-only (WebView2); a no-op elsewhere.
+#[cfg(windows)]
+mod webview_power {
+    use tauri::{AppHandle, Manager};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2TrySuspendCompletedHandler, ICoreWebView2TrySuspendCompletedHandler_Impl,
+        ICoreWebView2_3,
+    };
+    use windows_core::{implement, Interface, BOOL, HRESULT};
+
+    // TrySuspend requires a completion handler; we do not need its result.
+    #[implement(ICoreWebView2TrySuspendCompletedHandler)]
+    struct SuspendDone;
+
+    impl ICoreWebView2TrySuspendCompletedHandler_Impl for SuspendDone_Impl {
+        fn Invoke(&self, _errorcode: HRESULT, _result: BOOL) -> windows_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub fn suspend(app: &AppHandle) {
+        let Some(w) = app.get_webview_window("main") else {
+            return;
+        };
+        let _ = w.with_webview(|webview| unsafe {
+            let controller = webview.controller();
+            let _ = controller.SetIsVisible(false); // required before a suspend
+            if let Ok(core) = controller.CoreWebView2() {
+                if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
+                    let handler: ICoreWebView2TrySuspendCompletedHandler = SuspendDone.into();
+                    let _ = core3.TrySuspend(&handler);
+                }
+            }
+        });
+    }
+
+    pub fn resume(app: &AppHandle) {
+        let Some(w) = app.get_webview_window("main") else {
+            return;
+        };
+        let _ = w.with_webview(|webview| unsafe {
+            let controller = webview.controller();
+            if let Ok(core) = controller.CoreWebView2() {
+                if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
+                    let _ = core3.Resume();
+                }
+            }
+            let _ = controller.SetIsVisible(true);
+        });
+    }
+}
+
 /// Bring the main window back from the tray.
 fn show_main_window(app: &AppHandle) {
+    #[cfg(windows)]
+    webview_power::resume(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -474,8 +569,9 @@ fn show_main_window(app: &AppHandle) {
 }
 
 /// System-tray icon so the app keeps running in the background once its window
-/// is closed. Left-click reopens the main window; right-click shows our own
-/// rounded popup (a real frameless window, not the OS menu) near the cursor.
+/// is closed. Either mouse button shows our own rounded popup (a real frameless
+/// window, not the OS menu) near the cursor — with the account, live sync status,
+/// a "Sync now" action, and Open / Sign out / Quit.
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -489,13 +585,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
             match event {
+                // Both buttons open our own rounded popup (account, sync status, and
+                // Open / Sign out / Quit). "Open" in the popup brings the window back.
                 TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => show_main_window(app),
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
+                    button: MouseButton::Left | MouseButton::Right,
                     button_state: MouseButtonState::Up,
                     ..
                 } => show_tray_popup(app),
@@ -513,7 +606,7 @@ fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     let popup =
         tauri::WebviewWindowBuilder::new(app, "tray_popup", tauri::WebviewUrl::default())
             .title("")
-            .inner_size(288.0, 336.0)
+            .inner_size(320.0, 436.0)
             .decorations(false)
             .transparent(true)
             .shadow(false)
@@ -593,7 +686,7 @@ fn show_tray_popup(app: &AppHandle) {
     let Some(w) = app.get_webview_window("tray_popup") else {
         return;
     };
-    let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(288, 336));
+    let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(320, 436));
     if let Ok(Some(monitor)) = w.primary_monitor() {
         let ms = monitor.size();
         let taskbar = (48.0 * monitor.scale_factor()) as i32;
@@ -614,6 +707,39 @@ fn show_tray_popup(app: &AppHandle) {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+/// Relaunch the app (used to apply the "show in File Explorer" toggle, which mounts
+/// or unmounts the sync root at startup).
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
+/// Launch the freshly downloaded installer in update mode (it replaces this install
+/// in place and relaunches the app), then quit so the running files unlock. The
+/// installer runs from TEMP and breaks away from any job so it survives our exit.
+#[tauri::command]
+fn run_updater(app: AppHandle, path: String) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        let spawn = |flags: u32| {
+            std::process::Command::new(&path)
+                .arg("--update")
+                .current_dir(std::env::temp_dir())
+                .creation_flags(flags)
+                .spawn()
+        };
+        let _ = spawn(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+            .or_else(|_| spawn(DETACHED_PROCESS | CREATE_NO_WINDOW));
+    }
+    #[cfg(not(windows))]
+    let _ = path;
     app.exit(0);
 }
 
@@ -662,13 +788,41 @@ pub fn run() {
             move_captcha,
             close_captcha,
             quit_app,
+            run_updater,
+            restart_app,
             hide_tray_popup,
             open_main_from_tray,
             secure_store::store_set,
             secure_store::store_get,
-            secure_store::store_del
+            secure_store::store_del,
+            cloud_mount::downloads_dir,
+            cloud_mount::reveal_downloads,
+            cloud_mount::mark_in_sync,
+            cloud_mount::populate_mount,
+            cloud_mount::sync_now,
+            cloud_mount::pin_selected,
+            cloud_mount::free_up_selected,
+            cloud_mount::hydrated_uids,
+            cloud_mount::show_in_explorer,
+            cloud_mount::set_show_in_explorer,
+            cloud_mount::auto_download,
+            cloud_mount::set_auto_download,
+            cloud_mount::synced_albums,
+            cloud_mount::set_album_synced,
+            cloud_mount::sync_busy
         ])
         .setup(|app| {
+            // The Explorer "Proton Photos" mount (nav-pane entry + cloud placeholders
+            // that hydrate on open). Opt-in: the installer checkbox / Settings toggle
+            // sets the preference, default on. Best-effort, never blocks startup.
+            if cloud_mount::show_in_explorer_enabled() {
+                cloud_mount::ensure_folder();
+                cloud_mount::mount(app.handle().clone());
+            } else {
+                // Opted out: remove the registration so the nav-pane entry is gone.
+                cloud_mount::unmount(app.handle().clone());
+            }
+
             // Tauri touches the OS app-data dir on init even though, on an
             // installed build, we keep everything in the install folder. A moment
             // after startup, drop that stray dir if it is empty, so nothing is
@@ -715,6 +869,12 @@ pub fn run() {
                 let _ = window.hide();
                 api.prevent_close();
                 let _ = window.app_handle().emit("window-hidden", ());
+                // Suspend the now-hidden window's WebView2 so it stops holding its
+                // renderer memory while the app only lives in the tray.
+                #[cfg(windows)]
+                if window.label() == "main" {
+                    webview_power::suspend(window.app_handle());
+                }
             }
         })
         .run(tauri::generate_context!())

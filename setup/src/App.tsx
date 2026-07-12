@@ -37,6 +37,7 @@ export default function App() {
   const [dir, setDir] = useState("");
   const [desktop, setDesktop] = useState(true);
   const [startMenu, setStartMenu] = useState(true);
+  const [networkDrive, setNetworkDrive] = useState(true);
   const [error, setError] = useState("");
   const [existing, setExisting] = useState<string | null>(null);
 
@@ -75,7 +76,7 @@ export default function App() {
   async function doInstall() {
     setStep("working");
     try {
-      await invoke("install", { dir, desktop, startMenu });
+      await invoke("install", { dir, desktop, startMenu, networkDrive });
       setStep("done");
     } catch (e) {
       setError(String(e));
@@ -167,6 +168,16 @@ export default function App() {
             <label className="check">
               <input type="checkbox" checked={startMenu} onChange={(e) => setStartMenu(e.currentTarget.checked)} />
               <span>Start menu</span>
+            </label>
+
+            <label className="field-label mt">File Explorer</label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={networkDrive}
+                onChange={(e) => setNetworkDrive(e.currentTarget.checked)}
+              />
+              <span>Show "Proton Photos" in the sidebar</span>
             </label>
 
             <div className="footer">

@@ -254,6 +254,9 @@ async function drain(photos: any): Promise<void> {
   try {
     while (queue.length > 0 && !abort.signal.aborted) {
       const group = queue.shift()!;
+      process.stderr.write(
+        `[upload] start "${group.album ?? "timeline"}": ${group.files.length} files\n`,
+      );
 
       let albumUid: string | null = null;
       if (group.album) {
@@ -300,14 +303,22 @@ async function drain(photos: any): Promise<void> {
       );
 
       if (albumUid && uploaded.length > 0) {
+        // Add the files that DID upload to their album even if the user cancelled:
+        // they are already in the cloud, so finishing this beats leaving an empty
+        // album with the photos orphaned on the timeline. A fresh signal, so the
+        // cancel that stopped the uploads does not also abort this last step.
+        const addSignal = new AbortController().signal;
         try {
-          for await (const result of photos.addPhotosToAlbum(albumUid, uploaded, abort.signal)) {
+          for await (const result of photos.addPhotosToAlbum(albumUid, uploaded, addSignal)) {
             if (!result.ok) process.stderr.write(`[upload] add to album failed: ${result.uid}\n`);
           }
         } catch (e) {
           process.stderr.write(`[upload] addPhotosToAlbum: ${(e as Error).message}\n`);
         }
       }
+      process.stderr.write(
+        `[upload] done "${group.album ?? "timeline"}": ${uploaded.length}/${group.files.length} uploaded\n`,
+      );
     }
   } catch (e) {
     process.stderr.write(`[upload] drain failed: ${(e as Error).stack ?? String(e)}\n`);

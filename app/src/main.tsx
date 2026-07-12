@@ -24,11 +24,11 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 // Tokens first: every other stylesheet resolves its colours against them.
-import "./theme.css";
+import "./styles/theme.css";
 import App from "./App";
-import { TrayPopup } from "./TrayPopup";
-import { LangProvider } from "./i18n";
-import { applyTheme, type ThemeMode } from "./theme";
+import { TrayPopup } from "./views/TrayPopup";
+import { LangProvider } from "./lib/i18n";
+import { applyTheme, type ThemeMode } from "./lib/theme";
 
 // The Rust host loads this same frontend into a frameless, transparent window
 // labelled "tray_popup". When that is the window we are in, render the little
