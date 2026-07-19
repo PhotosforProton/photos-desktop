@@ -25,6 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Titlebar } from "./components/Titlebar";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { ContextMenu, type MenuAction } from "./components/ContextMenu";
 import { Photos } from "./views/Photos";
 import { Lock } from "./views/Lock";
 import { rpc } from "./lib/rpc";
@@ -78,6 +79,11 @@ function App() {
   }, []);
 
   // On startup, decide between the app, the lock screen, and a fresh sign-in.
+  //
+  // Both calls below are the first thing to reach the sidecar, and starting the SDK
+  // process is the single most expensive thing about a launch. This window is the only
+  // one that pays it: a file opened from Explorer gets a window of its own, which is
+  // built without any of this and paints with no vault, no sign-in and no sidecar.
   useEffect(() => {
     (async () => {
       try {
@@ -106,21 +112,17 @@ function App() {
     })();
   }, []);
 
-  // Disable the native context menu and show our own (to be expanded later).
+  // The native menu is off everywhere, and this is what stands in for it on a
+  // right-click nothing else claimed. A photo or an album has a menu of its own
+  // and stops the event before it reaches the document, so exactly one menu ever
+  // opens. The menu itself owns its dismissal, so there is no click handler here.
   useEffect(() => {
     function onContextMenu(e: MouseEvent) {
       e.preventDefault();
       setMenu({ x: e.clientX, y: e.clientY });
     }
-    function dismiss() {
-      setMenu(null);
-    }
     document.addEventListener("contextmenu", onContextMenu);
-    document.addEventListener("click", dismiss);
-    return () => {
-      document.removeEventListener("contextmenu", onContextMenu);
-      document.removeEventListener("click", dismiss);
-    };
+    return () => document.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
   /** Route a sign-in result to the phase it asks for. */
@@ -311,6 +313,14 @@ function App() {
     setBusy(false);
   }
 
+  // What a right-click on the app itself offers, as opposed to on a photo or an
+  // album. Reloading is the whole of it for now, and the placeholder says so
+  // rather than leaving a menu of one.
+  const shellActions: MenuAction[] = [
+    { key: "reload", label: t("menu.reload"), onSelect: () => window.location.reload() },
+    { key: "moreSoon", label: t("menu.moreSoon"), disabled: true, onSelect: () => {} },
+  ];
+
   return (
     <div className="app-shell">
       <Titlebar />
@@ -421,10 +431,7 @@ function App() {
       )}
 
       {menu && (
-        <ul className="context-menu" style={{ top: menu.y, left: menu.x }}>
-          <li onClick={() => window.location.reload()}>{t("menu.reload")}</li>
-          <li className="disabled">{t("menu.moreSoon")}</li>
-        </ul>
+        <ContextMenu x={menu.x} y={menu.y} actions={shellActions} onClose={() => setMenu(null)} />
       )}
     </div>
   );

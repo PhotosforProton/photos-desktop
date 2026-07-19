@@ -24,23 +24,458 @@
 // the official Proton Drive SDK), and relays newline-delimited JSON-RPC to it,
 // one request at a time.
 
+// Public for the same reason as the two below: the installer compiles this file too,
+// so that uninstalling takes the Run entry with it.
+pub mod autostart;
 mod cloud_mount;
+// Public because the installer compiles this same file (see its header), and a
+// module the app itself never reads would otherwise read as dead code.
+pub mod data_format;
+// Public for the same reason: the installer compiles this one too, and the identity
+// constants in it are the installer's to read, not the app's.
+pub mod file_assoc;
+mod local_file;
+mod local_folder;
 mod secure_store;
+mod upload_frame;
 
+use std::collections::BinaryHeap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use tauri::webview::WebviewBuilder;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl};
 
 struct Sidecar {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    /// Every line the sidecar writes to stdout, in order, handed over by the reader
+    /// thread `spawn_sidecar` starts. Reading through a channel rather than straight
+    /// off the pipe is what makes a deadline possible at all: a blocking `read_line`
+    /// on a pipe cannot be given one, and the caller holds the admission gate while
+    /// it waits.
+    lines: Receiver<String>,
     next_id: u64,
 }
 
-type SharedSidecar = Arc<Mutex<Option<Sidecar>>>;
+/// Dropping a sidecar means it is finished with, so the process goes too. Nothing
+/// else ends it: `Child`'s own drop leaves it running, and for the case this exists
+/// for, a sidecar that stopped answering, that would strand a wedged process holding
+/// the unlocked session for as long as the app runs.
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        // Deliberately not waited on: a wedged process must not be able to block
+        // whoever is dropping it.
+        let _ = self.child.kill();
+    }
+}
+
+// ---- The sidecar admission gate ----
+//
+// Every sidecar RPC is serialized through a single channel: exactly one request may
+// be in flight, because `do_io` writes one line and reads until the first JSON line
+// without matching on a request id, so a second concurrent request would read the
+// first's response. That invariant is absolute and this gate never relaxes it.
+//
+// What the gate adds is ORDER. When the channel is busy and several callers are
+// waiting, `std::sync::Mutex` on Windows (an unfair SRWLOCK) would hand the channel
+// to an arbitrary waiter next, so an interactive click could sit behind a queued
+// background thumbnail batch. The gate instead admits the highest-priority waiter,
+// and the oldest within that priority, so a click never waits on a warm.
+
+/// How urgently one RPC should be admitted to the single sidecar channel. The derived
+/// `Ord` follows declaration order, so `Interactive` is the greatest and wins the
+/// waiter max-heap.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Priority {
+    /// Whole-library name/size enumeration for the Explorer mount and the search
+    /// index. Below `Background` on purpose, so thumbnail warming always beats it: on
+    /// a cold first run every new photo still costs one node decrypt, and putting that
+    /// sweep here lets the grid fill from cached thumbnails while the mount enumerates
+    /// behind it. Later runs read the enumeration from cache and finish in a blink.
+    Enumerate,
+    /// Whole-library warming and mount bookkeeping: yields to everything above it.
+    Background,
+    /// The default for any request not named in `priority_for` (user-driven
+    /// mutations, and any newly added method), so nothing is ever accidentally
+    /// starved at the bottom.
+    UserAction,
+    /// The user is blocked on this exact result: opening a photo/video or its
+    /// details, Explorer opening a placeholder, and session lifecycle.
+    Interactive,
+}
+
+/// The method -> priority map. Exhaustive for the methods we know; anything unlisted
+/// falls to `UserAction` (never `Background`), so an unrecognised or newly added
+/// method is never buried under the warmer.
+fn priority_for(method: &str) -> Priority {
+    match method {
+        // The user is waiting on the answer.
+        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile"
+        // Session lifecycle: must never sit behind a warm.
+        | "__init" | "ping" | "lock" | "unlock" | "signOut" => Priority::Interactive,
+
+        // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
+        // even though the user is looking at that photo: the transfer itself runs inside
+        // the sidecar and never touches this channel, so these two calls only start it
+        // and read its progress, and both return in microseconds. Keeping them here means
+        // the preview of a photo the user just stepped to is always admitted first — the
+        // preview is what makes the viewer feel instant, the upgrade is the luxury on top.
+        // Interactive bursts are finite, so neither call can be starved for long.
+        //
+        // `readOriginalBytes` is the one call in this group that carries real weight: it
+        // hands a whole photo over the channel. It sits in the same tier for the same
+        // reason, and it must never be raised — a preview the user is waiting on would
+        // then queue behind a multi-megabyte transfer. The sidecar caps what may take
+        // this route so the hold stays under the gate's perceptual budget; anything
+        // larger is staged as a file and never appears here at all.
+        "getOriginal" | "releaseOriginal" | "readOriginalBytes" => Priority::UserAction,
+
+        // Whole-library name/size enumeration: the slowest sweeps, and the only ones
+        // that decrypt a node per photo on a cold run. Below warming so a cold first
+        // run fills the grid from thumbnails while these enumerate the mount behind it.
+        "listForMount" | "getMetadata" => Priority::Enumerate,
+
+        // Warming and mount bookkeeping: whole-library sweeps that must yield.
+        "getThumbnails" | "listAlbumsForMount"
+        | "getAlbums" | "getAlbumPhotos" | "getAlbumPhotoUids" | "heapStats"
+        | "whoami" | "getAccountInfo" | "getShared" | "getSharingInfo"
+        | "checkUpdate" | "downloadUpdate" => Priority::Background,
+
+        // Everything else: user-driven mutations and any method not named above.
+        _ => Priority::UserAction,
+    }
+}
+
+/// One waiter's place in line: its priority, then its arrival order. `Ord` makes a
+/// higher priority greater and, within one priority, an EARLIER arrival greater, so
+/// the max-heap's peek is always the highest-priority, longest-waiting caller (FIFO
+/// within a priority).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Ticket {
+    prio: Priority,
+    seq: u64,
+}
+
+impl Ord for Ticket {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Higher priority first; ties broken by the SMALLER seq (earlier arrival),
+        // which must compare as greater so it sits at the top of the max-heap.
+        self.prio
+            .cmp(&other.prio)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+impl PartialOrd for Ticket {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The id a cancellable call is known by, minted by the frontend.
+///
+/// Only a call the frontend explicitly marks this way can ever be dropped: everything
+/// else, every mutation included, reaches the sidecar exactly as before.
+type CallId = u64;
+
+/// What a call the frontend let go of answers with. It is not a failure and no caller
+/// reports it: the one thing that asks for a cancellable call already treats a missing
+/// answer the same as a failed one.
+const CANCELLED: &str = "rpc cancelled";
+
+/// The waiter queue, guarded by the gate's own mutex. That mutex is held only for the
+/// brief moments of joining the queue, checking the head, and releasing — never
+/// across the RPC itself, so callers can keep queueing while one request is in flight.
+struct GateState {
+    /// True while exactly one caller is doing I/O on the sidecar. No second caller may
+    /// proceed until it is false again.
+    busy: bool,
+    /// Monotonic arrival counter, for FIFO ordering within a priority.
+    next_seq: u64,
+    waiters: BinaryHeap<Ticket>,
+}
+
+/// A priority admission gate in front of the single sidecar channel.
+///
+/// The invariant is absolute: exactly one RPC is ever in flight. The gate only
+/// decides WHICH queued caller goes next when the channel frees up (the highest
+/// priority, oldest within it); it never lets two callers overlap.
+///
+/// Starvation is intentional and bounded: a `Background` waiter yields to every
+/// `Interactive` / `UserAction` caller and runs once they drain. Click and open
+/// bursts are finite, so background work always resumes; no aging is added, because
+/// it would trade that simple guarantee for complexity we do not need here.
+struct Gate {
+    state: Mutex<GateState>,
+    admit: Condvar,
+}
+
+/// Proof of admission from `acquire`. Releasing the gate is tied to dropping this, so
+/// every exit path — an early `?`, an error, a panic — frees the channel for the next
+/// waiter.
+struct GatePermit<'a> {
+    gate: &'a Gate,
+}
+
+impl Drop for GatePermit<'_> {
+    fn drop(&mut self) {
+        let mut st = self.gate.state.lock().unwrap();
+        st.busy = false;
+        // notify_all, not notify_one: a single wake could land on a waiter that is not
+        // the head, which would then re-check, see it is not first in line, and go back
+        // to sleep while the true head keeps sleeping — a stall. Waking all lets the
+        // head win and the rest re-queue.
+        self.gate.admit.notify_all();
+    }
+}
+
+impl Gate {
+    fn new() -> Self {
+        Gate {
+            state: Mutex::new(GateState {
+                busy: false,
+                next_seq: 0,
+                waiters: BinaryHeap::new(),
+            }),
+            admit: Condvar::new(),
+        }
+    }
+
+    /// Take a place in line at `prio` and block until the channel is free AND this
+    /// caller is the head of the queue. The wait is a predicate loop, as it must be:
+    /// `notify_all` wakes every waiter and the OS may wake one spuriously, so a wake is
+    /// only a hint to re-check, never permission to proceed. Checking the predicate
+    /// under the same mutex that guards `busy` is what makes a lost wakeup impossible.
+    fn acquire(&self, prio: Priority) -> GatePermit<'_> {
+        // A caller with nothing to abandon it can only leave this loop by being
+        // admitted, so the `None` arm below is unreachable for it.
+        self.acquire_unless(prio, &|| false)
+            .expect("a caller that cannot be abandoned is always admitted")
+    }
+
+    /// The same, for a caller that may be given up on while it queues.
+    ///
+    /// `abandoned` is re-read on every wake, under the gate's own mutex, so a caller
+    /// that has been let go of leaves the queue at the next wake rather than waiting to
+    /// reach the head. `None` means it left: nothing was written to the sidecar and the
+    /// channel was never held, which is the whole point of this. A superseded call costs
+    /// a heap pop, not a round trip.
+    fn acquire_unless(&self, prio: Priority, abandoned: &dyn Fn() -> bool) -> Option<GatePermit<'_>> {
+        let mut st = self.state.lock().unwrap();
+        let seq = st.next_seq;
+        st.next_seq = st.next_seq.wrapping_add(1);
+        let me = Ticket { prio, seq };
+        st.waiters.push(me);
+        while st.busy || st.waiters.peek() != Some(&me) {
+            if abandoned() {
+                // The seq is unique, so this takes out exactly this caller's ticket.
+                st.waiters.retain(|t| *t != me);
+                drop(st);
+                // Leaving cannot promote anyone who was not already admissible, so this
+                // is belt-and-braces rather than load-bearing.
+                self.admit.notify_all();
+                return None;
+            }
+            st = self.admit.wait(st).unwrap();
+        }
+        st.waiters.pop();
+        st.busy = true;
+        Some(GatePermit { gate: self })
+    }
+
+    /// Re-check every waiter's predicate now. Taking the same mutex the wait is
+    /// predicated on is what makes the wake impossible to miss: a waiter can only be
+    /// between reading its predicate and sleeping on it while it holds that mutex.
+    fn wake_all(&self) {
+        let _held = self.state.lock().unwrap();
+        self.admit.notify_all();
+    }
+
+    /// The number of callers currently queued. Test-only: lets a test line callers up
+    /// in a known order before releasing the holder.
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        self.state.lock().unwrap().waiters.len()
+    }
+}
+
+/// The single sidecar channel behind its priority gate. The `Sidecar` itself stays an
+/// `Option` (spawned lazily, dropped and respawned after a transport error), now
+/// reached only by whoever holds the gate — so `do_io` still sees exactly one request
+/// in flight and stays byte-for-byte unchanged.
+struct SidecarGate {
+    gate: Gate,
+    sidecar: Mutex<Option<Sidecar>>,
+    /// Every cancellable call that is queued or in flight, against whether the frontend
+    /// has since let go of it.
+    ///
+    /// An entry exists only between a call arriving and it answering, and a cancel that
+    /// names anything else is dropped rather than remembered. That is what bounds this:
+    /// it can never hold more than the calls actually outstanding, however many cancels
+    /// arrive late.
+    pending: Mutex<std::collections::HashMap<CallId, bool>>,
+}
+
+/// Keeps one call in `pending` for exactly as long as it is outstanding. Tied to a drop
+/// so that every exit path takes its entry with it: an early return, an error, a panic.
+struct Tracked<'a> {
+    shared: &'a SidecarGate,
+    id: CallId,
+}
+
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        self.shared.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+impl SidecarGate {
+    fn new() -> Self {
+        SidecarGate {
+            gate: Gate::new(),
+            sidecar: Mutex::new(None),
+            pending: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Start following a cancellable call. Idempotent, and deliberately so: the call is
+    /// registered on the way in from the frontend AND again once it reaches a pool
+    /// thread, and the second must not wipe a cancel that landed between the two.
+    fn track(&self, id: CallId) {
+        self.pending.lock().unwrap().entry(id).or_insert(false);
+    }
+
+    /// Let go of a call. Ignored unless it is still outstanding, which is what keeps a
+    /// cancel that lost the race to its own answer from leaving anything behind.
+    fn abandon(&self, id: CallId) {
+        let found = {
+            let mut pending = self.pending.lock().unwrap();
+            match pending.get_mut(&id) {
+                Some(flag) => {
+                    *flag = true;
+                    true
+                }
+                None => false,
+            }
+        };
+        // The `pending` lock is released first, on purpose: the queue's own predicate
+        // reads `pending` while holding the gate's mutex, so taking them in that order
+        // here too is what keeps the two from ever being taken in opposite orders.
+        if found {
+            self.gate.wake_all();
+        }
+    }
+
+    fn is_abandoned(&self, id: CallId) -> bool {
+        self.pending.lock().unwrap().get(&id).copied().unwrap_or(false)
+    }
+
+    /// How many calls are being followed. Test-only: what makes "a late cancel leaves
+    /// nothing behind" something a test can actually assert.
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.pending.lock().unwrap().len()
+    }
+
+    /// Queue for the channel, or `None` for a call the frontend has let go of.
+    ///
+    /// Checked on the way in, throughout the wait, and once more on admission. The last
+    /// of those is what covers a call given up on while it queued: the channel is free
+    /// either way at that point, so there is nothing to gain by spending it on an
+    /// answer nobody is waiting for.
+    fn admit(&self, method: &str, call_id: Option<CallId>) -> Option<GatePermit<'_>> {
+        let prio = priority_for(method);
+        let Some(id) = call_id else {
+            return Some(self.gate.acquire(prio));
+        };
+        if self.is_abandoned(id) {
+            return None;
+        }
+        let permit = self.gate.acquire_unless(prio, &|| self.is_abandoned(id))?;
+        if self.is_abandoned(id) {
+            return None; // dropping the permit hands the channel straight on
+        }
+        Some(permit)
+    }
+
+    /// Run one RPC end to end: queue by the method's priority and, once admitted, hold
+    /// the channel exclusively while writing the request and reading its response.
+    /// A call that waited to be admitted or held the channel long enough to be felt
+    /// records both figures, so the cost of the queue stays measurable where it
+    /// matters. Only the method name is logged (never params or ids): it is not user
+    /// data.
+    ///
+    /// `call_id` marks a call the frontend may abandon while it queues. Without one the
+    /// call is uncancellable and runs exactly as it always has, which is what keeps
+    /// every mutation out of reach of this.
+    fn rpc(
+        &self,
+        app: &AppHandle,
+        method: String,
+        params: serde_json::Value,
+        call_id: Option<CallId>,
+    ) -> Result<serde_json::Value, String> {
+        let _tracked = call_id.map(|id| {
+            self.track(id);
+            Tracked { shared: self, id }
+        });
+
+        let wait_start = Instant::now();
+        let permit = self.admit(&method, call_id);
+        let wait_ms = wait_start.elapsed().as_millis();
+
+        let Some(permit) = permit else {
+            // Nothing was written and the channel was never held, so there is no hold to
+            // report: the wait is the whole of what this call cost.
+            if wait_ms >= SLOW_RPC_MS {
+                note(app, &format!("[rpc] {method} wait={wait_ms} dropped"));
+            }
+            return Err(CANCELLED.to_string());
+        };
+
+        let hold_start = Instant::now();
+        let result = self.locked_io(app, &method, params);
+        let hold_ms = hold_start.elapsed().as_millis();
+
+        // Release the channel BEFORE logging, so the log write never extends the hold
+        // and makes the next waiter wait on this call's file I/O.
+        drop(permit);
+        if wait_ms >= SLOW_RPC_MS || hold_ms >= SLOW_RPC_MS {
+            note(app, &format!("[rpc] {method} wait={wait_ms} hold={hold_ms}"));
+        }
+        result
+    }
+
+    /// The critical section: the gate guarantees exactly one caller is here at a time,
+    /// so this is the only place the sidecar is touched. Spawns it lazily on first use,
+    /// and drops it after a transport error so the next call respawns — unchanged from
+    /// the original single-mutex path.
+    fn locked_io(
+        &self,
+        app: &AppHandle,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut guard = self
+            .sidecar
+            .lock()
+            .map_err(|_| "sidecar lock poisoned".to_string())?;
+        if guard.is_none() {
+            *guard = Some(spawn_sidecar(app)?);
+        }
+        let result = do_io(guard.as_mut().unwrap(), method.to_string(), params);
+        if result.is_err() {
+            // Drop the (possibly dead) sidecar so the next call spawns a fresh one.
+            *guard = None;
+        }
+        result
+    }
+}
+
+type SharedSidecar = Arc<SidecarGate>;
 
 fn sidecar_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sidecar")
@@ -49,7 +484,7 @@ fn sidecar_dir() -> std::path::PathBuf {
 /// Windows APIs hand back verbatim paths (`\\?\C:\...`). Rust opens them fine,
 /// but Node cannot: its main-module resolver walks such a path down to a bare
 /// `C:` and dies with `EISDIR`. Strip the prefix before handing a path over.
-fn strip_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
+pub(crate) fn strip_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
     match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
         Some(rest) => std::path::PathBuf::from(rest),
         None => path,
@@ -116,16 +551,273 @@ fn locate_packaged_sidecar(app: &AppHandle) -> Result<(std::path::PathBuf, std::
     Ok((runtime, script))
 }
 
-/// Append a host-side line to the same log the sidecar's stderr goes to.
-pub(crate) fn note(app: &AppHandle, message: &str) {
-    let Ok(dir) = secure_store::app_dir(app) else { return };
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("sidecar.log"))
-    {
-        let _ = writeln!(file, "[host] {message}");
+// ---- The on-disk log ----
+//
+// One file, written from two places: the host appends through `note`, and the
+// sidecar's stderr is redirected straight into it at spawn. It is also the one
+// artefact a user is likely to hand over when something goes wrong, so everything
+// that reaches it is scrubbed first and the file itself stays bounded.
+
+/// Roll over past roughly a megabyte, keeping one previous file. Large enough to
+/// hold a long session of the lines that survive `SLOW_RPC_MS`, small enough to
+/// send on.
+const LOG_MAX_BYTES: u64 = 1_000_000;
+
+/// Below this a call is simply working. The per-RPC line exists to catch one that
+/// queued or held the channel long enough for someone to feel it, and that is the
+/// only version of it worth reading back later: at a quarter of a second per
+/// thumbnail, logging every call made the file 98 percent scroll noise.
+const SLOW_RPC_MS: u128 = 1_000;
+
+/// Serializes rotation against the appends around it, so one thread cannot empty the
+/// file between another's size check and its write.
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+
+/// The shared log, and the single previous file kept beside it.
+fn log_paths(app: &AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = secure_store::app_dir(app).ok()?;
+    Some((dir.join("sidecar.log"), dir.join("sidecar.log.1")))
+}
+
+/// Roll the log over once it passes `LOG_MAX_BYTES`.
+///
+/// Copied then TRUNCATED in place, never renamed: the sidecar's stderr handle was
+/// opened on this file at spawn and follows the file itself rather than its name, so
+/// a rename would leave the sidecar writing into the archive, which would then grow
+/// without limit and defeat the rotation entirely. Truncating is safe for that same
+/// handle because it is in append mode, so its next write lands at the start of the
+/// emptied file instead of at a stale offset.
+fn rotate_log(live: &std::path::Path, previous: &std::path::Path) {
+    let full = std::fs::metadata(live).map(|m| m.len() >= LOG_MAX_BYTES).unwrap_or(false);
+    if !full {
+        return;
     }
+    let _ = std::fs::copy(live, previous);
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open(live)
+        .and_then(|f| f.set_len(0));
+}
+
+/// Append a host-side line to the same log the sidecar's stderr goes to.
+///
+/// Scrubbed here rather than at the call sites, so a line is safe whatever it was
+/// handed. Several callers pass an error string straight through from the SDK, and
+/// what one of those contains cannot be predicted from here.
+/// Wall-clock time of day, UTC, for the front of a log line.
+///
+/// A log with no clock in it cannot answer "did these two things happen together",
+/// which is the question every startup fault turns into. The date is left off: the
+/// file is small and rotates, and the time of day is what lines up with a report.
+fn stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let t = secs % 86_400;
+    format!("[{:02}:{:02}:{:02}]", t / 3600, (t % 3600) / 60, t % 60)
+}
+
+pub(crate) fn note(app: &AppHandle, message: &str) {
+    let Some((live, previous)) = log_paths(app) else {
+        return;
+    };
+    // Built whole and written once. `writeln!` on an unbuffered file emits each
+    // fragment of the format as its own append, so two threads logging at the same
+    // moment interleave and both lines come out mangled.
+    let mut line = String::with_capacity(message.len() + 32);
+    line.push_str(&stamp());
+    line.push(' ');
+    line.push_str("[host] ");
+    line.push_str(&scrub(message));
+    line.push('\n');
+    // Poisoning is not a reason to stop logging, so the guard is taken either way.
+    let _guard = LOG_LOCK.lock();
+    rotate_log(&live, &previous);
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&live) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Redact anything shaped like key material or personal data before it can reach the
+/// log. The sidecar scrubs its own lines the same way before writing them; this is
+/// the host's half of the same job.
+///
+/// The order is what makes it work: a URL or a Windows path is taken whole first, so
+/// the long-run rule cannot chew a hole in the middle of one and leave the rest
+/// standing.
+fn scrub(message: &str) -> String {
+    let s = scrub_pgp(message);
+    let s = scrub_urls(&s);
+    let s = scrub_emails(&s);
+    let s = scrub_user(&s);
+    scrub_runs(&s)
+}
+
+/// A PGP armor block, whatever it turns out to hold.
+fn scrub_pgp(s: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find(BEGIN) {
+        // Only a block that closes is a block; a line that merely starts like one is
+        // left alone rather than swallowing everything after it.
+        let after = &rest[start + BEGIN.len()..];
+        let Some(end) = after.find(END) else { break };
+        let tail = &after[end + END.len()..];
+        let Some(close) = tail.find("-----") else { break };
+        out.push_str(&rest[..start]);
+        out.push_str("[redacted PGP block]");
+        rest = &tail[close + 5..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A URL, from its scheme to the next space. The host of a Proton endpoint is
+/// harmless, but the path and query behind it carry node ids and share tokens.
+fn scrub_urls(s: &str) -> String {
+    const SCHEMES: [&str; 5] = ["https://", "http://", "wss://", "ws://", "file://"];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        // The earliest scheme left in the string, so a later one cannot hide an
+        // earlier one of a different kind.
+        let Some(start) = SCHEMES.iter().filter_map(|p| rest.find(*p)).min() else {
+            break;
+        };
+        let end = rest[start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
+            .map(|i| start + i)
+            .unwrap_or(rest.len());
+        out.push_str(&rest[..start]);
+        out.push_str("[redacted url]");
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An email address, local part and domain both: an SDK failure can name the account
+/// it failed for.
+fn scrub_emails(s: &str) -> String {
+    fn local(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'%' | b'+' | b'-')
+    }
+    fn domain(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-')
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'@' {
+            i += 1;
+            continue;
+        }
+        let mut start = i;
+        while start > copied && local(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = i + 1;
+        while end < bytes.len() && domain(bytes[end]) {
+            end += 1;
+        }
+        // Both halves have to be there, and a domain needs a dot inside it to be one,
+        // so a bare "@" or a "12@34" version string is left as it is.
+        let host = s[i + 1..end].trim_end_matches('.');
+        if start == i || !host.contains('.') {
+            i += 1;
+            continue;
+        }
+        out.push_str(&s[copied..start]);
+        out.push_str("[redacted email]");
+        copied = end;
+        i = end;
+    }
+    out.push_str(&s[copied..]);
+    out
+}
+
+/// The Windows account name, the one piece of personal data every absolute path
+/// carries. Only the name goes: what is left names an install rather than a person,
+/// and it is what makes a path in an error worth logging at all.
+fn scrub_user(s: &str) -> String {
+    // ASCII-only lowering, so every index into it addresses the same byte in `s`.
+    let lower = s.to_ascii_lowercase();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("users") {
+        let at = i + rel;
+        i = at + 5;
+        // Anchored on a drive, with either separator on either side, which covers
+        // both shapes a Windows error hands over.
+        let anchored = at >= 3
+            && (bytes[at - 3] as char).is_ascii_alphabetic()
+            && bytes[at - 2] == b':'
+            && matches!(bytes[at - 1], b'\\' | b'/');
+        if !anchored || !matches!(bytes.get(at + 5), Some(b'\\' | b'/')) {
+            continue;
+        }
+        let name = at + 6;
+        let mut end = name;
+        while end < bytes.len()
+            && !matches!(bytes[end], b'\\' | b'/' | b' ' | b'\t' | b'"' | b'\'' | b'<' | b'>' | b'|')
+        {
+            end += 1;
+        }
+        if end == name {
+            continue;
+        }
+        out.push_str(&s[copied..name]);
+        out.push_str("[user]");
+        copied = end;
+        i = end;
+    }
+    out.push_str(&s[copied..]);
+    out
+}
+
+/// Long base64, base64url and hex runs: armored key bodies, session keys, tokens, and
+/// the node uids that name a photo (each half of one is 86 characters, so a whole uid
+/// goes). Hex falls inside the same character class and needs no pass of its own.
+fn scrub_runs(s: &str) -> String {
+    const MIN_RUN: usize = 40;
+    fn part(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'_' | b'-')
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if !part(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && part(bytes[i]) {
+            i += 1;
+        }
+        if i - start < MIN_RUN {
+            continue;
+        }
+        // Base64 padding belongs to the run it closes.
+        let mut end = i;
+        while end < bytes.len() && bytes[end] == b'=' && end - i < 2 {
+            end += 1;
+        }
+        out.push_str(&s[copied..start]);
+        out.push_str("[redacted]");
+        copied = end;
+        i = end;
+    }
+    out.push_str(&s[copied..]);
+    out
 }
 
 /// Dev runs the TypeScript straight from the source tree, so editing the sidecar
@@ -145,13 +837,17 @@ fn dev_command() -> Command {
 /// Send it to a file in the app directory instead: without it, a failure on a
 /// user's machine leaves nothing to look at.
 fn sidecar_log(app: &AppHandle) -> Stdio {
-    let Ok(dir) = secure_store::app_dir(app) else {
+    let Some((live, previous)) = log_paths(app) else {
         return Stdio::null();
     };
+    // Rotate before the handle exists. The sidecar then holds it for its whole life,
+    // and `note` is the only thing left that can roll the file over under it.
+    let _guard = LOG_LOCK.lock();
+    rotate_log(&live, &previous);
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("sidecar.log"))
+        .open(&live)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null())
 }
@@ -187,10 +883,36 @@ fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
         .map_err(|e| format!("failed to spawn sidecar: {e}"))?;
     let stdin = child.stdin.take().ok_or("sidecar stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("sidecar stdout unavailable")?;
+
+    // One reader thread per sidecar, so a caller can wait for a response with a
+    // deadline instead of blocking on the pipe forever. The channel is bounded on
+    // purpose: with nobody reading, the sender blocks and the pipe fills up behind
+    // it, which is exactly the backpressure a chatty stdout met before, rather than
+    // this buffer growing without limit between calls.
+    let (tx, lines) = std::sync::mpsc::sync_channel::<String>(64);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                // A closed pipe or a read error means the process is gone. Returning
+                // drops the sender, which wakes a waiting caller with a disconnect
+                // instead of leaving it to sit out its whole deadline.
+                Ok(0) | Err(_) => return,
+                // Fails once the sidecar (and with it the receiver) has been dropped.
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
     let mut sc = Sidecar {
-        _child: child,
+        child,
         stdin,
-        reader: BufReader::new(stdout),
+        lines,
         next_id: 1,
     };
 
@@ -199,6 +921,37 @@ fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
     let init = secure_store::sidecar_init_params(app)?;
     do_io(&mut sc, "__init".to_string(), init)?;
     Ok(sc)
+}
+
+/// How long one call may go unanswered before the sidecar counts as wedged.
+///
+/// A single flat value cannot serve every method: `hydrateFile` and `getOriginal`
+/// legitimately stream a whole file, and the `Enumerate` tier sweeps the entire
+/// library on a cold run, while everything else answers in milliseconds. So patience
+/// is its own question, separate from `priority_for`'s urgency, and the two are tied
+/// together only where they genuinely coincide: the tier that exists BECAUSE it is
+/// slow inherits the long deadline, so a method added there can never be handed one
+/// it is bound to blow.
+///
+/// Both values sit far past anything a healthy call could reach, because being wrong
+/// costs wildly different amounts in the two directions. Too long only delays
+/// recovery from a hang that used to be permanent. Too short kills a working sidecar
+/// mid-transfer and takes the unlocked session down with it, which the user sees as
+/// being signed out at random.
+fn deadline_for(method: &str) -> Duration {
+    // A whole file over a slow link: a 2 GB video at 5 Mbit/s still fits.
+    const TRANSFER: Duration = Duration::from_secs(60 * 60);
+    // Everything else, where a cold, uncached batch is still a few seconds.
+    const REPLY: Duration = Duration::from_secs(5 * 60);
+    match method {
+        // The calls that move whole files: one photo or video for the mount or the
+        // viewer, or the installer for an update.
+        "hydrateFile" | "getOriginal" | "getVideo" | "downloadUpdate" => TRANSFER,
+        // The whole-library sweeps, named by their priority tier so the two lists
+        // cannot drift apart.
+        _ if priority_for(method) == Priority::Enumerate => TRANSFER,
+        _ => REPLY,
+    }
 }
 
 fn do_io(
@@ -219,16 +972,27 @@ fn do_io(
         .map_err(|e| format!("flush to sidecar failed: {e}"))?;
 
     // Requests are serialized; skip any stray non-JSON stdout (SDK/openpgp logs)
-    // until we reach our JSON-RPC response line.
+    // until the JSON-RPC response line is reached. The deadline covers the whole
+    // answer rather than each line, so a stream of stray lines cannot keep extending
+    // it, which is the shape a stuck sidecar would take if it kept logging.
+    let deadline = Instant::now() + deadline_for(&method);
     loop {
-        let mut resp_line = String::new();
-        let n = sc
-            .reader
-            .read_line(&mut resp_line)
-            .map_err(|e| format!("read from sidecar failed: {e}"))?;
-        if n == 0 {
-            return Err("sidecar closed unexpectedly".to_string());
-        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let resp_line = match sc.lines.recv_timeout(left) {
+            Ok(line) => line,
+            // Silence past the deadline. A sidecar that is alive but stuck is
+            // indistinguishable from a dead one for everyone queued behind it, and
+            // the gate permit is held until this returns, so waiting forever wedges
+            // every later call as well. Failing here drops the sidecar exactly as a
+            // transport error does, which discards the desynchronised stream with it
+            // rather than resuming a half-read conversation.
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!("sidecar did not answer {method} in time"));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("sidecar closed unexpectedly".to_string());
+            }
+        };
         let trimmed = resp_line.trim();
         if trimmed.is_empty() {
             continue;
@@ -240,36 +1004,33 @@ fn do_io(
     }
 }
 
+/// Bridge from a Tauri command or the mount into the gate. Kept as a thin wrapper so
+/// both entry points (`rpc` and `sidecar_rpc`) share the one path: priority is derived
+/// from the method name inside the gate, so neither caller can get it wrong.
+///
+/// `call_id` is the frontend's alone. Everything reaching the sidecar from inside the
+/// host (the mount's hydration, the viewer's byte protocol) passes `None` and is
+/// therefore uncancellable, because nothing over here has anyone to give up on it.
 fn rpc_blocking(
     app: &AppHandle,
     shared: &SharedSidecar,
     method: String,
     params: serde_json::Value,
+    call_id: Option<CallId>,
 ) -> Result<serde_json::Value, String> {
-    let mut guard = shared
-        .lock()
-        .map_err(|_| "sidecar lock poisoned".to_string())?;
-    if guard.is_none() {
-        *guard = Some(spawn_sidecar(app)?);
-    }
-    let result = do_io(guard.as_mut().unwrap(), method, params);
-    if result.is_err() {
-        // Drop the (possibly dead) sidecar so the next call spawns a fresh one.
-        *guard = None;
-    }
-    result
+    shared.rpc(app, method, params, call_id)
 }
 
 /// Call a sidecar method from Rust (e.g. the Cloud Filter mount's hydration and
-/// populate paths), unwrapping the `{ok,result,error}` envelope.
-#[cfg(windows)]
+/// populate paths, and the viewer's byte protocol), unwrapping the
+/// `{ok,result,error}` envelope.
 pub(crate) fn sidecar_rpc(
     app: &AppHandle,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let shared = app.state::<SharedSidecar>().inner().clone();
-    let resp = rpc_blocking(app, &shared, method.to_string(), params)?;
+    let resp = rpc_blocking(app, &shared, method.to_string(), params, None)?;
     if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         Ok(resp.get("result").cloned().unwrap_or(serde_json::Value::Null))
     } else {
@@ -303,11 +1064,94 @@ async fn rpc(
     state: State<'_, SharedSidecar>,
     method: String,
     params: serde_json::Value,
+    call_id: Option<CallId>,
 ) -> Result<serde_json::Value, String> {
     let shared = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || rpc_blocking(&app, &shared, method, params))
-        .await
-        .map_err(|e| format!("sidecar task failed: {e}"))?
+    // Registered here rather than inside the task below, so a cancel arriving while the
+    // task is still waiting for a thread from the blocking pool already finds the call
+    // to mark. Registering twice is harmless: `track` never clears an existing entry.
+    if let Some(id) = call_id {
+        shared.track(id);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        rpc_blocking(&app, &shared, method, params, call_id)
+    })
+    .await
+    .map_err(|e| format!("sidecar task failed: {e}"))?
+}
+
+/// Let go of a call the frontend no longer wants the answer to.
+///
+/// Deliberately not a sidecar call and deliberately not behind the gate: it sets one
+/// flag, so it answers immediately even while the channel is busy with something long.
+/// A call this reaches before it is admitted never touches the sidecar at all; one it
+/// misses answers normally and the frontend discards the result, exactly as before.
+#[tauri::command]
+fn cancel_rpc(state: State<'_, SharedSidecar>, call_id: CallId) {
+    state.inner().abandon(call_id);
+}
+
+// ---- The viewer's in-memory original ----
+//
+// The full-resolution photo the viewer is showing reaches the webview through this
+// scheme instead of a file. The sidecar holds the decrypted bytes in memory and hands
+// them over on the one request naming their token, so the ordinary case now writes no
+// decrypted photo to disk at all. Only originals too large for the channel still stage
+// a file (see MAX_INMEMORY_ORIGINAL in the sidecar's download module), and those keep
+// the asset protocol and its one-folder scope exactly as they were.
+//
+// Why this is narrower than what it displaces, despite being a second origin on
+// `img-src`: it reads no filesystem, it serves exactly one photo — the one the viewer
+// is on — and only to a caller that already knows the random token the sidecar minted
+// for it. Stepping to the next photo drops the bytes, so a URL kept from earlier
+// resolves to nothing. Nothing else in the app is reachable through it.
+
+/// The scheme's URL is `http://pfpview.localhost/<token>` on Windows and
+/// `pfpview://localhost/<token>` elsewhere; the frontend builds it with Tauri's own
+/// `convertFileSrc`, so it never has to know which.
+const VIEW_SCHEME: &str = "pfpview";
+
+/// Fetch and decode the bytes behind one token. `None` covers every miss the same
+/// way — an unknown or stale token, a locked account, a sidecar that is not there —
+/// because the viewer's answer to all of them is identical: keep the preview.
+fn original_bytes(app: &AppHandle, token: &str) -> Option<(Vec<u8>, String)> {
+    let result = sidecar_rpc(
+        app,
+        "readOriginalBytes",
+        serde_json::json!({ "token": token }),
+    )
+    .ok()?;
+    let b64 = result.get("base64")?.as_str()?;
+    let mime = result
+        .get("mime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).ok()?;
+    Some((bytes, mime))
+}
+
+fn serve_original(app: &AppHandle, token: &str) -> tauri::http::Response<Vec<u8>> {
+    use tauri::http::{header, HeaderValue, Response, StatusCode};
+    let build = |status: StatusCode, mime: &str, body: Vec<u8>| {
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        // The media type comes from the sidecar's own allowlist, so this only ever
+        // falls back on a value that could not be a header at all.
+        let value = HeaderValue::from_str(mime)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+        response.headers_mut().insert(header::CONTENT_TYPE, value);
+        // A photo's bytes are the user's own and live for one view: never let the
+        // webview keep a copy past the moment the sidecar drops it.
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+    };
+    match original_bytes(app, token) {
+        Some((bytes, mime)) => build(StatusCode::OK, &mime, bytes),
+        None => build(StatusCode::NOT_FOUND, "text/plain", Vec::new()),
+    }
 }
 
 // ---- Human verification (captcha) ----
@@ -376,7 +1220,7 @@ async fn open_captcha(
     {
         return Err("refusing to open a page outside the Proton captcha origin".into());
     }
-    let window = app.get_window("main").ok_or("no main window")?;
+    let window = app.get_window(MAIN_WINDOW).ok_or("no main window")?;
     if let Some(existing) = app.get_webview(CAPTCHA_LABEL) {
         let _ = existing.close();
     }
@@ -502,6 +1346,210 @@ mod tray_dismiss {
     }
 }
 
+// ---- Windows ----
+//
+// Three, and the frontend routes on which one it is running in rather than on any
+// state of its own. None is declared in tauri.conf.json: a launch that only has a file
+// to show must not pay for the app's window, and a window declared in the config is
+// created before a line of this runs.
+
+/// The app itself: the library, the sign-in ladder, Settings.
+const MAIN_WINDOW: &str = "main";
+/// One file, opened from Explorer. Its own window, so a library being browsed in the
+/// main one is not replaced by it.
+const VIEWER_WINDOW: &str = "viewer";
+/// The tray flyout.
+const TRAY_POPUP_WINDOW: &str = "tray_popup";
+
+const APP_TITLE: &str = "Photos for Proton";
+
+/// Show a window the frontend has finished painting, and put it in front.
+///
+/// Both real windows ship hidden so an empty transparent frame is never seen, and this
+/// is what ends that. It is a command rather than `show()` from the renderer for the
+/// foreground: Windows refuses `SetForegroundWindow` to a process that is not the
+/// active one, which is exactly the case for a double-click in Explorer reaching an
+/// app that was already running, and only the host can lift that.
+/// True while this launch is one nobody watched happen: started by Windows at login,
+/// with the tray as the whole of its presence until the app is actually asked for.
+static BACKGROUND_LAUNCH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn background_launch() -> bool {
+    BACKGROUND_LAUNCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A line from the page, which until now could not reach the log at all.
+///
+/// The frontend's only trace was accidental: an RPC that happened to take over a
+/// second. So a startup that failed before its first call left the file saying
+/// nothing, and an empty window and a healthy one looked identical in it.
+///
+/// Capped and scrubbed like every other line. This is the one input to the log that
+/// comes from the page, and a page can be handed an error of any length.
+#[tauri::command]
+fn log_note(app: AppHandle, message: String) {
+    let short: String = message.chars().take(400).collect();
+    note(&app, &format!("[ui] {short}"));
+}
+
+/// The current start-with-Windows preference, for the Settings toggle.
+#[tauri::command]
+fn launch_at_login() -> bool {
+    autostart::enabled()
+}
+
+/// Set it. The one failure worth reporting is being unable to write the entry, since
+/// a switch that flips back on its own is worse than one that says why it did not.
+#[tauri::command]
+fn set_launch_at_login(enabled: bool) -> Result<(), String> {
+    autostart::set(enabled)
+}
+
+#[tauri::command]
+fn reveal_window(window: tauri::WebviewWindow) {
+    // The app's window builds and paints on a background launch exactly as it always
+    // does, and asks to be shown at the end of it. Refusing here rather than skipping
+    // the build is what makes opening it from the tray instant: the renderer is warm
+    // and the first frame is already drawn, so there is nothing left to wait for.
+    if window.label() == MAIN_WINDOW && background_launch() {
+        // Painted, and staying off screen. Without this the renderer would hold its
+        // couple of hundred megabytes from login until the window was first opened
+        // and closed again, which is the opposite of what starting quietly is for.
+        // Closing to the tray suspends for the same reason; this is the one way into
+        // that state that never passes through a close.
+        #[cfg(windows)]
+        {
+            let app = window.app_handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if background_launch() {
+                    webview_power::suspend(&app);
+                }
+            });
+        }
+        return;
+    }
+    show_main_or_viewer(&window);
+    let _ = window.unminimize();
+    force_foreground(&window);
+}
+
+/// Put a window on screen, with its renderer awake.
+///
+/// The two halves belong together and used to be apart, which is how the app could end
+/// up as an empty transparent pane: the main window's renderer can be suspended while
+/// the window is hidden, and only ONE of the three paths that show it ever resumed.
+/// Any of the other two put a live frame on screen over a renderer that had been told
+/// it was invisible. Every show goes through here now, so the pairing cannot come
+/// apart again. Resuming something that was never suspended is a no-op.
+fn show_main_or_viewer(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if window.label() == MAIN_WINDOW {
+        webview_power::resume(window.app_handle());
+    }
+    let _ = window.show();
+}
+
+/// Show `window` if the frontend never got as far as asking.
+///
+/// A window that stays hidden because its renderer failed is indistinguishable from
+/// the app not having started, and for the viewer it is worse: a double-click would
+/// produce nothing at all, with no tray icon to explain it.
+fn reveal_safety_net(window: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        // Hidden on purpose is not the failure this catches. Rechecked here rather
+        // than skipped at the call, because the app can be asked for during the wait.
+        if window.label() == MAIN_WINDOW && background_launch() {
+            return;
+        }
+        if !window.is_visible().unwrap_or(false) {
+            show_main_or_viewer(&window);
+        }
+    });
+}
+
+/// The app's own window. Built rather than declared so it exists only once the app
+/// itself has been asked for.
+fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let main = tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::default())
+        .title(APP_TITLE)
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(720.0, 500.0)
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .visible(false)
+        .build()?;
+    // A stale Windows icon cache could otherwise leave the old taskbar icon.
+    if let Some(icon) = app.default_window_icon().cloned() {
+        let _ = main.set_icon(icon);
+    }
+    reveal_safety_net(main);
+    Ok(())
+}
+
+/// The window one file is shown in, created on the first request for one and reused
+/// for every request after it.
+///
+/// Reused rather than multiplied on purpose. A window here is a WebView2 renderer,
+/// which is the same couple of hundred megabytes the app goes out of its way to
+/// suspend while it sits in the tray, and a viewer per double-click would hand a user
+/// browsing a folder a screen full of them. One window that follows the file being
+/// asked for is also what the taskbar reads as "the photo viewer", rather than a
+/// growing row of identical entries.
+pub(crate) fn show_viewer_window(app: &AppHandle) {
+    if let Some(existing) = app.get_webview_window(VIEWER_WINDOW) {
+        let _ = existing.show();
+        let _ = existing.unminimize();
+        force_foreground(&existing);
+        return;
+    }
+    let built = tauri::WebviewWindowBuilder::new(app, VIEWER_WINDOW, tauri::WebviewUrl::default())
+        .title(APP_TITLE)
+        .inner_size(1000.0, 700.0)
+        .min_inner_size(480.0, 360.0)
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .visible(false)
+        .center()
+        .build();
+    match built {
+        Ok(viewer) => {
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _ = viewer.set_icon(icon);
+            }
+            reveal_safety_net(viewer);
+        }
+        // Deliberately no path in the message: the file is the user's business.
+        Err(e) => note(app, &format!("[viewer] window creation failed: {e}")),
+    }
+}
+
+/// Everything the app itself needs and a viewer does not: its window, the tray, and
+/// the background services.
+///
+/// Once, whichever way it is reached. The mount registration and the sync-engine
+/// connection are per-process, and a second window under the same label would fail
+/// the build.
+fn ensure_app_started(app: &AppHandle) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        if let Err(e) = build_main_window(app) {
+            note(app, &format!("[host] main window creation failed: {e}"));
+        }
+        if let Err(e) = build_tray(app) {
+            note(app, &format!("[host] tray creation failed: {e}"));
+        }
+        if let Err(e) = build_tray_popup(app) {
+            note(app, &format!("[host] tray popup creation failed: {e}"));
+        }
+        start_background_services(app);
+    });
+}
+
 /// Suspend / resume the main window's WebView2 so it does not hold its full renderer
 /// memory (~200 MB) while the app is only in the tray. Suspending keeps all page
 /// state; the view resumes instantly on show. Best-effort: any failure just leaves the
@@ -526,9 +1574,20 @@ mod webview_power {
     }
 
     pub fn suspend(app: &AppHandle) {
-        let Some(w) = app.get_webview_window("main") else {
+        let Some(w) = app.get_webview_window(super::MAIN_WINDOW) else {
             return;
         };
+        // Never on a window that is on screen. Suspending hides the renderer inside a
+        // frame that stays where it is, and this window is frameless and transparent,
+        // so the result is not a blank page but an empty sheet of glass with no way
+        // back: nothing that shows the window afterwards would resume it.
+        //
+        // The check lives here rather than at each caller because it has to hold for
+        // all of them at once. Both callers decide to suspend on a timer, and the
+        // window can be asked for in the moment between that decision and this call.
+        if w.is_visible().unwrap_or(false) {
+            return;
+        }
         let _ = w.with_webview(|webview| unsafe {
             let controller = webview.controller();
             let _ = controller.SetIsVisible(false); // required before a suspend
@@ -542,7 +1601,7 @@ mod webview_power {
     }
 
     pub fn resume(app: &AppHandle) {
-        let Some(w) = app.get_webview_window("main") else {
+        let Some(w) = app.get_webview_window(super::MAIN_WINDOW) else {
             return;
         };
         let _ = w.with_webview(|webview| unsafe {
@@ -557,15 +1616,32 @@ mod webview_power {
     }
 }
 
-/// Bring the main window back from the tray.
+/// The app itself has been asked for: from the tray, from a second launch that named
+/// no file, or from the viewer's offer to sign in.
+///
+/// One path for all three, because all three mean the same thing. A launch that only
+/// had a file to show skipped the app's window, its tray and its services, so the
+/// first of these has to build them before there is anything to bring back; the rest
+/// find them already there and only raise the window.
 fn show_main_window(app: &AppHandle) {
-    #[cfg(windows)]
-    webview_power::resume(app);
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
+    local_file::app_taken_over(app);
+    // The app has now been asked for, so a launch that began in the tray stops being
+    // one. Cleared before anything else here: what follows may build the window, and
+    // that window asks to be shown the moment it has painted.
+    BACKGROUND_LAUNCH.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Read before, not after: whether the window was already there is what decides who
+    // shows it, and `ensure_app_started` is what makes the answer stop being no.
+    let existing = app.get_webview_window(MAIN_WINDOW);
+    ensure_app_started(app);
+    // One that had to be built reveals itself once its first frame is painted, exactly
+    // as it does on an ordinary launch. Showing it from here would put the empty
+    // transparent frame on screen that shipping it hidden exists to avoid.
+    let Some(w) = existing else {
+        return;
+    };
+    show_main_or_viewer(&w);
+    let _ = w.unminimize();
+    force_foreground(&w);
 }
 
 /// System-tray icon so the app keeps running in the background once its window
@@ -601,10 +1677,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 /// A frameless, transparent popup styled like the app (rounded corners). It
 /// loads the frontend, which renders the tray menu when it sees this window's
-/// label ("tray_popup"). Created hidden at startup; shown on tray right-click.
+/// label. Created hidden alongside the app's own window; shown on a tray click.
 fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     let popup =
-        tauri::WebviewWindowBuilder::new(app, "tray_popup", tauri::WebviewUrl::default())
+        tauri::WebviewWindowBuilder::new(app, TRAY_POPUP_WINDOW, tauri::WebviewUrl::default())
             .title("")
             .inner_size(320.0, 436.0)
             .decorations(false)
@@ -620,7 +1696,7 @@ fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     popup.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
-            if let Some(w) = handle.get_webview_window("tray_popup") {
+            if let Some(w) = handle.get_webview_window(TRAY_POPUP_WINDOW) {
                 let _ = w.hide();
             }
         }
@@ -628,11 +1704,12 @@ fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Force the popup to the foreground. Windows blocks `SetForegroundWindow` when the
-/// calling app is not the active one (so `set_focus` alone leaves the popup shown
-/// but unfocused, and the first click outside would not dismiss it). Briefly
-/// attaching our input thread to the current foreground thread lifts that
-/// restriction, then we can steal focus.
+/// Force a window to the foreground. Windows blocks `SetForegroundWindow` when the
+/// calling app is not the active one, so `set_focus` alone leaves a window shown but
+/// behind whatever the user was in: the tray popup would not dismiss on the first
+/// click outside, and a viewer opened from Explorer would come up behind Explorer.
+/// Briefly attaching this app's input thread to the current foreground thread lifts
+/// that restriction, and the focus can then be taken.
 #[cfg(windows)]
 fn force_foreground(window: &tauri::WebviewWindow) {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -683,7 +1760,7 @@ fn native_show(_window: &tauri::WebviewWindow) {}
 /// Anchor the popup bottom-right, above the taskbar, like a standard tray flyout,
 /// then tell it to refresh its account data (it was created before sign-in).
 fn show_tray_popup(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("tray_popup") else {
+    let Some(w) = app.get_webview_window(TRAY_POPUP_WINDOW) else {
         return;
     };
     let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(320, 436));
@@ -717,17 +1794,55 @@ fn restart_app(app: AppHandle) {
     app.restart();
 }
 
+/// The Explorer "Proton Photos" mount: the nav-pane entry, and the cloud placeholders
+/// that hydrate on open. Opt-in through the installer checkbox and the Settings toggle,
+/// default on. Best-effort and non-blocking; any failure leaves an ordinary folder.
+///
+/// Reached only through `ensure_app_started`, which is what guarantees the once: the
+/// registration and the sync engine connection are per-process, and connecting a second
+/// time would leave two.
+fn start_background_services(app: &AppHandle) {
+    if cloud_mount::show_in_explorer_enabled() {
+        cloud_mount::ensure_folder();
+        cloud_mount::mount(app.clone());
+    } else {
+        // Opted out: remove the registration so the nav-pane entry is gone.
+        cloud_mount::unmount(app.clone());
+    }
+}
+
+/// The app itself has been asked for from the viewer, which is where signing in to
+/// upload the open file leads. Everything a viewer launch deliberately skipped happens
+/// here, so that one path reaches a working app rather than a half-started one.
+///
+/// The viewer window is left alone. It is its own window now, the file in it is what
+/// the sign-in was for, and closing it would take away the thing the user is signing in
+/// about.
+#[tauri::command]
+fn enter_app(app: AppHandle) {
+    show_main_window(&app);
+}
+
 /// Launch the freshly downloaded installer in update mode (it replaces this install
 /// in place and relaunches the app), then quit so the running files unlock. The
 /// installer runs from TEMP and breaks away from any job so it survives our exit.
 #[tauri::command]
-fn run_updater(app: AppHandle, path: String) {
+fn run_updater(app: AppHandle) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        // The one path the sidecar writes a hash-verified installer to, computed
+        // here rather than taken as an argument: executing a path the renderer
+        // chose would hand any injected script arbitrary code execution, and the
+        // CSP that otherwise contains the renderer cannot reach this far.
+        let path = std::env::temp_dir().join("pfp-update.exe");
+        if !path.is_file() {
+            note(&app, "[update] no verified installer staged, not launching");
+            return;
+        }
         let spawn = |flags: u32| {
             std::process::Command::new(&path)
                 .arg("--update")
@@ -735,11 +1850,14 @@ fn run_updater(app: AppHandle, path: String) {
                 .creation_flags(flags)
                 .spawn()
         };
-        let _ = spawn(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
-            .or_else(|_| spawn(DETACHED_PROCESS | CREATE_NO_WINDOW));
+        if spawn(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+            .or_else(|_| spawn(DETACHED_PROCESS | CREATE_NO_WINDOW))
+            .is_err()
+        {
+            note(&app, "[update] could not launch the installer");
+            return;
+        }
     }
-    #[cfg(not(windows))]
-    let _ = path;
     app.exit(0);
 }
 
@@ -747,7 +1865,7 @@ fn run_updater(app: AppHandle, path: String) {
 fn hide_tray_popup(app: AppHandle) {
     #[cfg(windows)]
     tray_dismiss::uninstall();
-    if let Some(w) = app.get_webview_window("tray_popup") {
+    if let Some(w) = app.get_webview_window(TRAY_POPUP_WINDOW) {
         let _ = w.hide();
     }
 }
@@ -756,10 +1874,210 @@ fn hide_tray_popup(app: AppHandle) {
 fn open_main_from_tray(app: AppHandle) {
     #[cfg(windows)]
     tray_dismiss::uninstall();
-    if let Some(w) = app.get_webview_window("tray_popup") {
+    if let Some(w) = app.get_webview_window(TRAY_POPUP_WINDOW) {
         let _ = w.hide();
     }
     show_main_window(&app);
+}
+
+/// True when Explorer offers this app for EVERY photo and video type it claims, false
+/// otherwise, read out of the registry rather than remembered.
+///
+/// The one boolean stands for the whole registration, and it means all of it, not part
+/// of it: a registration that lost some of its types reads false, which is the reading
+/// the user can act on, since switching on rewrites the lot. The reasoning is in
+/// `file_assoc::registration_is_complete`, and it is worth reading before this is
+/// loosened, because false over a partial registration is a deliberate choice and not
+/// an oversight.
+#[tauri::command]
+fn file_association_enabled() -> bool {
+    file_assoc::is_registered()
+}
+
+/// Turn the "Open with" offer on or off.
+///
+/// Safe to call again in either direction, and switching on is a full repair rather
+/// than a top-up: it writes every key and value the current list names whatever was
+/// already there, so a registration left uneven by a failed write, by a hand-edited
+/// registry, or by an older build that claimed fewer types comes out whole. Switching
+/// off twice finds nothing left the second time. Explorer is told either way, so the
+/// change reaches the context menu without a sign-out.
+#[tauri::command]
+fn set_file_association(enabled: bool) -> Result<(), String> {
+    if enabled {
+        // The app registers ITSELF. Reading an install location back out of the
+        // registry would be a guess, and a wrong one for a copy that has been moved.
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        file_assoc::register(&exe)?;
+    } else {
+        file_assoc::unregister();
+    }
+    // The switch reports the registry, so the command owes the caller a registry that
+    // agrees before it returns. Removal is best-effort key by key on purpose, since one
+    // locked key belonging to another app must not abort the rest, which leaves this as
+    // the only place a switch-off that did not take can be caught.
+    if file_assoc::is_registered() != enabled {
+        return Err("the file association did not change".into());
+    }
+    Ok(())
+}
+
+/// The Windows Settings page where a default handler is chosen, documented by Microsoft
+/// as part of the `ms-settings:` URI scheme.
+///
+/// Windows 11 also accepts a `?registeredAppUser=` parameter that opens one app's own
+/// page, which would be the better destination. It is deliberately not sent: the name
+/// it resolves is a value under `HKCU\Software\RegisteredApplications`, a Default
+/// Programs registration neither this app nor its installer writes. Windows answers a
+/// name it cannot resolve with this same page, so the parameter would buy nothing while
+/// claiming a registration that is not there.
+#[cfg(windows)]
+const DEFAULT_APPS_PAGE: &str = "ms-settings:defaultapps";
+
+/// A NUL-terminated UTF-16 buffer for a Win32 string pointer. The terminator is the
+/// point of it: the call receives a bare pointer and has nothing else to tell it where
+/// the string ends.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Hand a URI to the shell, the way a double-click would. `ShellExecuteW` reports
+/// success as an `HINSTANCE` above 32, which is the whole of what it says.
+#[cfg(windows)]
+fn shell_open(target: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let target = wide(target);
+    // A null verb is the default one, which for a URI scheme is what opens it.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR::null(),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    result.0 as isize > 32
+}
+
+/// Take the user to where a default handler is chosen.
+///
+/// Being OFFERED for a type and being the one that OPENS it are different things, and
+/// only the first is this app's to set. Windows seals the default behind a hash it
+/// verifies and blocks a program from writing its own, by design and against malware,
+/// so pointing the user at the surface where the choice is theirs is the whole of the
+/// honest help available here.
+#[tauri::command]
+fn open_default_apps() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if shell_open(DEFAULT_APPS_PAGE) {
+            return Ok(());
+        }
+        // Reached only where the `ms-settings:` scheme has no handler at all, which is
+        // to say a Windows without the Settings app. The Control Panel page is the
+        // older surface for the same choice and is what such a machine still has.
+        if std::process::Command::new("control.exe")
+            .args(["/name", "Microsoft.DefaultPrograms"])
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        Err("could not open the Windows default apps settings".into())
+    }
+    #[cfg(not(windows))]
+    Err("choosing a default app is a Windows setting".into())
+}
+
+#[cfg(all(test, windows))]
+mod default_apps_tests {
+    use super::*;
+
+    /// The buffer reaches Win32 as a bare pointer, so the terminator is the only thing
+    /// that says where the string stops. Without it the call reads past the end.
+    #[test]
+    fn wide_strings_are_nul_terminated() {
+        let encoded = wide(DEFAULT_APPS_PAGE);
+        assert_eq!(encoded.last(), Some(&0), "no terminator");
+        assert_eq!(
+            String::from_utf16_lossy(&encoded[..encoded.len() - 1]),
+            DEFAULT_APPS_PAGE
+        );
+        assert_eq!(encoded.iter().filter(|c| **c == 0).count(), 1, "terminated twice");
+        // An empty string is still a string, and still has to stop somewhere.
+        assert_eq!(wide(""), vec![0]);
+    }
+
+    /// The per-app deep link resolves a name under `RegisteredApplications`, and nothing
+    /// here writes one. Carrying the parameter would name a registration that does not
+    /// exist, and Windows would fall back to this same page anyway.
+    #[test]
+    fn the_settings_page_claims_no_app_registration() {
+        assert!(DEFAULT_APPS_PAGE.starts_with("ms-settings:"), "{DEFAULT_APPS_PAGE}");
+        assert!(!DEFAULT_APPS_PAGE.contains("registeredApp"), "{DEFAULT_APPS_PAGE}");
+        assert!(!DEFAULT_APPS_PAGE.contains('?'), "{DEFAULT_APPS_PAGE}");
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    /// The capability file, read at compile time so it cannot go stale against the
+    /// binary that carries it.
+    const CAPABILITY: &str = include_str!("../capabilities/default.json");
+
+    fn capability() -> serde_json::Value {
+        serde_json::from_str(CAPABILITY).expect("the capability file is not valid JSON")
+    }
+
+    /// A window whose label the capability does not list gets no IPC at all, and the
+    /// failure is silent: every call from it is refused, so it comes up as a frame with
+    /// a dead page in it rather than as an error anyone sees. Nothing else in the build
+    /// ties the two together, so this is what does.
+    #[test]
+    fn every_window_the_host_builds_is_covered_by_the_capability() {
+        let cap = capability();
+        let listed: Vec<&str> = cap["windows"]
+            .as_array()
+            .expect("no windows array")
+            .iter()
+            .map(|w| w.as_str().expect("a window label is not a string"))
+            .collect();
+        for label in [MAIN_WINDOW, VIEWER_WINDOW, TRAY_POPUP_WINDOW] {
+            assert!(listed.contains(&label), "{label} is not in the capability: {listed:?}");
+        }
+    }
+
+    /// The renderer drives its own window through these, and `core:window:default`
+    /// carries none of them: it is read-only, so each one has to be granted by name.
+    /// Dropping any leaves a window that cannot be moved, closed, or named after the
+    /// file in it.
+    #[test]
+    fn the_window_controls_the_renderer_uses_are_granted() {
+        let cap = capability();
+        let granted: Vec<&str> = cap["permissions"]
+            .as_array()
+            .expect("no permissions array")
+            .iter()
+            .map(|p| p.as_str().expect("a permission is not a string"))
+            .collect();
+        for permission in [
+            "core:window:allow-close",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-start-dragging",
+            "core:window:allow-set-title",
+        ] {
+            assert!(granted.contains(&permission), "{permission} is not granted");
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -775,52 +2093,119 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // A second launch just focuses the already-running window.
-            show_main_window(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A second launch is one of two things, and they are not the same request.
+            // A file goes to the viewer and leaves the app's window exactly as it was,
+            // library and all; anything else is the app itself being started again, so
+            // that is what comes forward.
+            if !local_file::deliver_warm(app, &argv) {
+                show_main_window(app);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(SharedSidecar::default())
+        .manage::<SharedSidecar>(Arc::new(SidecarGate::new()))
+        .manage(local_file::PendingOpen::default())
+        .manage(local_file::ViewerOnlyLaunch::default())
+        .manage(local_file::StagedPreview::default())
+        .manage(local_folder::FolderListing::default())
+        // Asynchronous, so the fetch runs on a blocking thread: the handler goes
+        // through the sidecar gate, and doing that on the webview's own thread would
+        // freeze the window for the length of the transfer.
+        .register_asynchronous_uri_scheme_protocol(VIEW_SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            // The whole path is the token. Anything else it might carry is ignored:
+            // there is nothing to address here but the one original.
+            let token = request
+                .uri()
+                .path()
+                .trim_start_matches('/')
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(serve_original(&app, &token));
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             rpc,
+            cancel_rpc,
             open_captcha,
             move_captcha,
             close_captcha,
             quit_app,
             run_updater,
             restart_app,
+            enter_app,
+            reveal_window,
+            log_note,
+            launch_at_login,
+            set_launch_at_login,
             hide_tray_popup,
             open_main_from_tray,
             secure_store::store_set,
             secure_store::store_get,
             secure_store::store_del,
-            cloud_mount::downloads_dir,
-            cloud_mount::reveal_downloads,
-            cloud_mount::mark_in_sync,
             cloud_mount::populate_mount,
             cloud_mount::sync_now,
             cloud_mount::pin_selected,
             cloud_mount::free_up_selected,
+            cloud_mount::free_up_all,
             cloud_mount::hydrated_uids,
+            cloud_mount::local_usage,
             cloud_mount::show_in_explorer,
             cloud_mount::set_show_in_explorer,
             cloud_mount::auto_download,
             cloud_mount::set_auto_download,
             cloud_mount::synced_albums,
             cloud_mount::set_album_synced,
-            cloud_mount::sync_busy
+            cloud_mount::album_local_count,
+            cloud_mount::free_up_album,
+            cloud_mount::sync_busy,
+            file_association_enabled,
+            set_file_association,
+            open_default_apps,
+            local_file::take_pending_open,
+            local_file::local_file_info,
+            local_file::local_file_url,
+            local_file::decode_preview,
+            local_file::rename_local_file,
+            local_file::delete_local_file,
+            local_folder::list_media_folder,
+            local_folder::local_thumbnails,
+            upload_frame::upload_frames
         ])
         .setup(|app| {
-            // The Explorer "Proton Photos" mount (nav-pane entry + cloud placeholders
-            // that hydrate on open). Opt-in: the installer checkbox / Settings toggle
-            // sets the preference, default on. Best-effort, never blocks startup.
-            if cloud_mount::show_in_explorer_enabled() {
-                cloud_mount::ensure_folder();
-                cloud_mount::mount(app.handle().clone());
-            } else {
-                // Opted out: remove the registration so the nav-pane entry is gone.
-                cloud_mount::unmount(app.handle().clone());
+            // The file a cold launch was asked to open. The single-instance callback
+            // above never runs for the first process, and this never runs for a second
+            // one, so both are needed and neither is a duplicate of the other. This one
+            // opens the viewer window itself, since no webview exists yet to hear an event.
+            let argv: Vec<String> = std::env::args().collect();
+            // Read before the window is built, since that is what consults it. A
+            // launch carrying a file to show is a launch someone is watching, so the
+            // flag never applies to one: the two cannot both be true.
+            let opened_a_file = local_file::deliver_cold(app.handle(), &argv);
+            if !opened_a_file && argv.iter().any(|a| a == autostart::BACKGROUND_FLAG) {
+                BACKGROUND_LAUNCH.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            // An install that moved keeps starting with Windows; one that never asked
+            // to start is left alone.
+            #[cfg(windows)]
+            autostart::refresh();
+
+            // Our own temp leftovers, swept unconditionally: orphaned plaintext
+            // hydration files must not linger, and this used to hang off the mount,
+            // so opting out of Explorer meant they were never cleaned at all. A viewer
+            // launch sweeps too, because the folder emptied here is the one its own
+            // decoded previews are staged in.
+            cloud_mount::reap_temp_leftovers();
+            // A launch that exists only to show a file stops here, with one window on
+            // screen and nothing else built. What `ensure_app_started` holds is the app
+            // starting up, and none of it is on the path from a double-click to a
+            // picture; it runs if and when the app itself is asked for.
+            if !opened_a_file {
+                ensure_app_started(app.handle());
             }
 
             // Tauri touches the OS app-data dir on init even though, on an
@@ -841,42 +2226,376 @@ pub fn run() {
                     });
                 }
             }
-            // The main window ships hidden (visible:false) and the frontend reveals
-            // it once painted, so no empty transparent frame flashes on startup.
-            // Pin its icon to the app icon explicitly (a stale Windows icon cache
-            // could otherwise leave the old taskbar icon), and, as a safety net,
-            // show it anyway if the frontend never got the chance to.
-            if let Some(main) = app.get_webview_window("main") {
-                if let Some(icon) = app.default_window_icon().cloned() {
-                    let _ = main.set_icon(icon);
-                }
-                let fallback = main.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    if !fallback.is_visible().unwrap_or(false) {
-                        let _ = fallback.show();
-                    }
-                });
-            }
-            build_tray(app.handle())?;
-            build_tray_popup(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Close to tray: hide instead of quitting so the app keeps running
-            // in the background. Quitting for real is the tray's "Quit" item.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-                let _ = window.app_handle().emit("window-hidden", ());
-                // Suspend the now-hidden window's WebView2 so it stops holding its
-                // renderer memory while the app only lives in the tray.
-                #[cfg(windows)]
-                if window.label() == "main" {
-                    webview_power::suspend(window.app_handle());
+            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            let app = window.app_handle();
+            match window.label() {
+                // The viewer closes for real: it holds one file, and the user is done
+                // with it. If that file is the whole of what this process was ever
+                // started for there is nothing behind the window to keep running, and
+                // a process left in the tray with nothing on screen is
+                // indistinguishable from the app having died.
+                VIEWER_WINDOW => {
+                    local_file::forget_pending_open(app);
+                    if local_file::viewer_only_launch(app) {
+                        app.exit(0);
+                    }
+                }
+                // Close to tray: the app keeps running in the background, and quitting
+                // for real is the tray's own Quit. Suspending the now-hidden WebView2
+                // stops it holding its renderer memory while nothing is on screen.
+                MAIN_WINDOW => {
+                    let _ = window.hide();
+                    api.prevent_close();
+                    let _ = app.emit("window-hidden", ());
+                    #[cfg(windows)]
+                    webview_power::suspend(app);
+                }
+                // The popup dismisses itself on click-outside and is shown again from
+                // the tray, so it is hidden rather than destroyed: there would be
+                // nothing left to show next time.
+                _ => {
+                    let _ = window.hide();
+                    api.prevent_close();
                 }
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod gate_tests {
+    // The gate is tested in isolation: `Gate` carries no `Sidecar`, so these exercise
+    // the queueing and mutual-exclusion logic without spawning the Node process.
+    use super::{Gate, Priority};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Run `body` under a watchdog that aborts the whole test binary if it has not
+    /// finished within `secs`. Belt-and-braces proof of termination: a deadlocked gate
+    /// would hang here, and the abort turns that hang into a loud failure instead of a
+    /// silently stuck test run.
+    fn with_watchdog<F: FnOnce()>(secs: u64, body: F) {
+        let done = Arc::new(AtomicUsize::new(0));
+        let watch = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            let start = Instant::now();
+            while watch.load(Ordering::SeqCst) == 0 {
+                if start.elapsed() > Duration::from_secs(secs) {
+                    eprintln!("watchdog: gate test exceeded {secs}s, treating as a deadlock");
+                    std::process::abort();
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        body();
+        done.store(1, Ordering::SeqCst);
+        let _ = handle.join();
+    }
+
+    /// Spin until the gate has exactly `n` waiters queued, so callers can be lined up
+    /// in a known order before the holder releases. Bounded by the caller's watchdog.
+    fn wait_until_queued(gate: &Gate, n: usize) {
+        while gate.queued() != n {
+            thread::yield_now();
+        }
+    }
+
+    // (a) Highest priority first, and FIFO within one priority.
+    #[test]
+    fn admits_by_priority_then_fifo() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            // Hold the gate with a low-priority caller so every waiter below must queue.
+            let holder = gate.acquire(Priority::Background);
+
+            let order = Arc::new(Mutex::new(Vec::<u32>::new()));
+            // Queue callers ONE AT A TIME (waiting until each is in the heap before
+            // launching the next), so arrival order — and thus the FIFO tiebreak — is
+            // deterministic: ids 1,2 Background; 3,5 Interactive; 4 UserAction.
+            let plan = [
+                (1u32, Priority::Background),
+                (2, Priority::Background),
+                (3, Priority::Interactive),
+                (4, Priority::UserAction),
+                (5, Priority::Interactive),
+            ];
+            let mut threads = Vec::new();
+            for (id, prio) in plan {
+                let gate_t = Arc::clone(&gate);
+                let order_t = Arc::clone(&order);
+                let already = gate.queued();
+                threads.push(thread::spawn(move || {
+                    let permit = gate_t.acquire(prio);
+                    order_t.lock().unwrap().push(id);
+                    drop(permit);
+                }));
+                wait_until_queued(&gate, already + 1);
+            }
+
+            // Everyone is queued behind the holder; releasing lets the gate drain by
+            // priority, then FIFO within a priority.
+            drop(holder);
+            for t in threads {
+                t.join().unwrap();
+            }
+
+            // Interactive first (3 before 5), then UserAction (4), then Background
+            // (1 before 2).
+            assert_eq!(*order.lock().unwrap(), vec![3, 5, 4, 1, 2]);
+        });
+    }
+
+    // (b)+(c) Mutual exclusion under many concurrent, mixed-priority callers, and the
+    // whole thing terminates.
+    #[test]
+    fn never_admits_two_at_once() {
+        with_watchdog(20, || {
+            let gate = Arc::new(Gate::new());
+            let inside = Arc::new(AtomicUsize::new(0));
+            let overlaps = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+
+            let mut threads = Vec::new();
+            for t in 0..16u32 {
+                let gate_t = Arc::clone(&gate);
+                let inside_t = Arc::clone(&inside);
+                let overlaps_t = Arc::clone(&overlaps);
+                let peak_t = Arc::clone(&peak);
+                threads.push(thread::spawn(move || {
+                    // Rotate through the priorities so the heap really reorders callers.
+                    let prio = match t % 3 {
+                        0 => Priority::Background,
+                        1 => Priority::UserAction,
+                        _ => Priority::Interactive,
+                    };
+                    for _ in 0..250 {
+                        let permit = gate_t.acquire(prio);
+                        // A shared counter that must never exceed 1 while the gate holds.
+                        let now = inside_t.fetch_add(1, Ordering::SeqCst) + 1;
+                        if now > 1 {
+                            overlaps_t.fetch_add(1, Ordering::SeqCst);
+                        }
+                        peak_t.fetch_max(now, Ordering::SeqCst);
+                        // A brief, real critical section widens any overlap window.
+                        thread::yield_now();
+                        inside_t.fetch_sub(1, Ordering::SeqCst);
+                        drop(permit);
+                    }
+                }));
+            }
+            for t in threads {
+                t.join().unwrap();
+            }
+
+            assert_eq!(
+                overlaps.load(Ordering::SeqCst),
+                0,
+                "two RPCs were admitted at once"
+            );
+            assert_eq!(
+                peak.load(Ordering::SeqCst),
+                1,
+                "more than one caller held the gate simultaneously"
+            );
+        });
+    }
+
+    // (d) A waiter given up on while it queues leaves without ever being admitted, and
+    // the queue behind it drains as if it had never joined. This is the whole fix: a
+    // superseded call has to stop costing the channel anything, not merely stop being
+    // listened to.
+    #[test]
+    fn an_abandoned_waiter_leaves_the_queue() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::Interactive);
+
+            let gone = Arc::new(AtomicUsize::new(0)); // 0 = still queued, 1 = let go
+            let admitted = Arc::new(Mutex::new(Vec::<u32>::new()));
+
+            // Queued first and at the highest priority, so it would be admitted before
+            // anyone else if it were still there when the holder releases.
+            let gate_a = Arc::clone(&gate);
+            let gone_a = Arc::clone(&gone);
+            let admitted_a = Arc::clone(&admitted);
+            let abandoned = thread::spawn(move || {
+                let permit = gate_a.acquire_unless(Priority::Interactive, &|| {
+                    gone_a.load(Ordering::SeqCst) == 1
+                });
+                if permit.is_some() {
+                    admitted_a.lock().unwrap().push(1);
+                }
+                permit.is_some()
+            });
+            wait_until_queued(&gate, 1);
+
+            let gate_b = Arc::clone(&gate);
+            let admitted_b = Arc::clone(&admitted);
+            let kept = thread::spawn(move || {
+                let permit = gate_b.acquire(Priority::Interactive);
+                admitted_b.lock().unwrap().push(2);
+                drop(permit);
+            });
+            wait_until_queued(&gate, 2);
+
+            // Let go of the first while both are still waiting on a busy channel.
+            gone.store(1, Ordering::SeqCst);
+            gate.wake_all();
+            // It must leave on that wake alone, without the channel ever freeing up.
+            while gate.queued() != 1 {
+                thread::yield_now();
+            }
+
+            drop(holder);
+            assert!(!abandoned.join().unwrap(), "an abandoned waiter was admitted");
+            kept.join().unwrap();
+            assert_eq!(
+                *admitted.lock().unwrap(),
+                vec![2],
+                "only the caller still waiting for its answer should reach the channel"
+            );
+        });
+    }
+
+    // (e) The predicate is the only thing that drops a caller: one that is never
+    // abandoned goes through exactly as `acquire` does.
+    #[test]
+    fn a_live_waiter_is_still_admitted() {
+        with_watchdog(10, || {
+            let gate = Gate::new();
+            let permit = gate.acquire_unless(Priority::UserAction, &|| false);
+            assert!(permit.is_some(), "a caller nobody let go of must be admitted");
+            drop(permit);
+            // And the channel is free afterwards, so the next caller does not hang.
+            drop(gate.acquire(Priority::Background));
+        });
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    // What the frontend's cancel actually reaches. `SidecarGate` spawns its Node process
+    // lazily, so one can be built and exercised here without any sidecar existing.
+    use super::SidecarGate;
+
+    #[test]
+    fn a_cancel_only_lands_while_the_call_is_outstanding() {
+        let shared = SidecarGate::new();
+
+        shared.track(7);
+        assert!(!shared.is_abandoned(7), "a fresh call is not abandoned");
+        shared.abandon(7);
+        assert!(shared.is_abandoned(7));
+
+        // Registering again must not undo a cancel that landed in between: the frontend
+        // registers on the way in and the pool thread registers again when it starts.
+        shared.track(7);
+        assert!(shared.is_abandoned(7), "a second registration wiped the cancel");
+    }
+
+    #[test]
+    fn a_cancel_that_lost_the_race_leaves_nothing_behind() {
+        let shared = SidecarGate::new();
+
+        // The call answered and stopped being followed before the cancel arrived.
+        shared.track(1);
+        shared.pending.lock().unwrap().remove(&1);
+        shared.abandon(1);
+        assert_eq!(shared.tracked(), 0, "a late cancel was remembered");
+        assert!(!shared.is_abandoned(1));
+
+        // Same for one that was never ours at all.
+        shared.abandon(9999);
+        assert_eq!(shared.tracked(), 0);
+    }
+
+    #[test]
+    fn one_call_being_abandoned_says_nothing_about_another() {
+        let shared = SidecarGate::new();
+        shared.track(1);
+        shared.track(2);
+        shared.abandon(1);
+        assert!(shared.is_abandoned(1));
+        assert!(!shared.is_abandoned(2), "a cancel reached the wrong call");
+        assert_eq!(shared.tracked(), 2);
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::{deadline_for, priority_for, scrub, Priority};
+
+    /// A node uid in the shape the mount actually holds one: two 86-character
+    /// base64url halves joined by a tilde. This is what an SDK error string can carry
+    /// into the log.
+    fn uid() -> String {
+        let half = "A".repeat(86);
+        format!("{half}==~{half}==")
+    }
+
+    #[test]
+    fn a_node_uid_does_not_survive() {
+        let out = scrub(&format!("[cloud] hydrate download failed: {} is gone", uid()));
+        assert!(!out.contains("AAAA"), "part of a uid survived: {out}");
+        assert!(out.contains("hydrate download failed"), "the message was lost: {out}");
+        assert!(out.contains("is gone"), "the tail was lost: {out}");
+    }
+
+    #[test]
+    fn a_pgp_block_goes_whole() {
+        let out = scrub("key: -----BEGIN PGP PRIVATE KEY BLOCK-----\nxyzzy\n-----END PGP PRIVATE KEY BLOCK-----\ndone");
+        assert_eq!(out, "key: [redacted PGP block]\ndone");
+    }
+
+    #[test]
+    fn an_unterminated_block_is_not_a_block() {
+        // Otherwise a stray line of dashes would swallow everything logged after it.
+        let line = "-----BEGIN PGP MESSAGE----- and then nothing";
+        assert_eq!(scrub(line), line);
+    }
+
+    #[test]
+    fn a_path_keeps_everything_but_the_account_name() {
+        let out = scrub(r"sidecar missing: runtime C:\Users\jbrightwell\AppData\Local\App\x.exe (exists: false)");
+        assert!(!out.contains("jbrightwell"), "the account name survived: {out}");
+        assert!(out.contains(r"C:\Users\[user]\AppData\Local\App\x.exe"), "the path was lost: {out}");
+    }
+
+    #[test]
+    fn an_email_and_a_url_both_go() {
+        let out = scrub("failed for ada@example.com at https://drive-api.proton.me/v2/nodes?id=7");
+        assert_eq!(out, "failed for [redacted email] at [redacted url]");
+    }
+
+    #[test]
+    fn an_ordinary_line_is_left_alone() {
+        for line in [
+            "[cloud] populate: created 12 photo placeholders, reconciled 3 existing",
+            "[rpc] getThumbnails wait=1200 hold=3400",
+            "[rpc] getPreview wait=2600 dropped",
+            "[cloud] hydrate start (size=4096 by=photosforproton.exe explicit=false)",
+            "[freeup] convert-dehydrate failed: ERROR_INVALID_HANDLE",
+        ] {
+            assert_eq!(scrub(line), line, "an ordinary line was chewed up");
+        }
+    }
+
+    #[test]
+    fn only_the_slow_calls_get_the_long_deadline() {
+        let long = deadline_for("hydrateFile");
+        assert_eq!(deadline_for("getOriginal"), long, "a whole-file transfer must not be cut short");
+        // The whole-library sweeps come in by priority tier, not by a second list.
+        assert_eq!(priority_for("listForMount"), Priority::Enumerate);
+        assert_eq!(deadline_for("listForMount"), long);
+        assert!(deadline_for("getPreview") < long);
+        assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
+    }
 }

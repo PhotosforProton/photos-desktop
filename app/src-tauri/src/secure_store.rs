@@ -27,9 +27,10 @@
 // only the same Windows user on the same machine can unseal it, and nothing is
 // registered anywhere the system can enumerate.
 //
-// This key now backs only the `settings` blob (theme, language, toggles), which
-// must be readable before login. The session and thumbnail cache are owned by
-// the sidecar and encrypted with a stronger, password-derived vault key instead.
+// This key backs what must be readable before login: the `settings` blob (theme,
+// language, toggles) and the mount's own uid lists. The session and thumbnail cache
+// are owned by the sidecar and encrypted with a stronger, password-derived vault key
+// instead.
 
 use std::fs;
 use std::path::PathBuf;
@@ -45,7 +46,14 @@ const DPAPI_ENTROPY: &[u8] = b"eu.akoos.photos.desktop/store/v1";
 const KEY_FILE: &str = "key.bin";
 const NONCE_LEN: usize = 12;
 
-/// The installer lays the app out as `<install>\app.exe` + `<install>\resources\`
+/// Separate entropy and a separate file for the vault-metadata key, so it is not
+/// interchangeable with the store key above. That key opens the settings blob and
+/// the mount's uid lists; this one is handed to the sidecar, and a single key doing
+/// both jobs would widen what a leak on either side costs.
+const VAULT_KEY_ENTROPY: &[u8] = b"eu.akoos.photos.desktop/vaultmeta/v1";
+const VAULT_KEY_FILE: &str = "vaultmeta.bin";
+
+/// The installer lays the app out as the app's exe + `<install>\resources\`
 /// (the runtime) + a runtime `<install>\data\`. When that layout is present
 /// (the runtime sits under `resources\` next to us), keep ALL data in
 /// `<install>\data` so everything lives in ONE install folder and the uninstaller
@@ -123,26 +131,39 @@ fn safe_name(name: &str) -> Result<String, String> {
     Ok(format!("{name}.bin"))
 }
 
-#[tauri::command]
-pub fn store_set(app: AppHandle, name: String, value: String) -> Result<(), String> {
-    let path = app_dir(&app)?.join(safe_name(&name)?);
-    let blob = seal(&data_key(&app)?, value.as_bytes())?;
+/// Seal one text file into the app directory. Named directly, so callers inside the
+/// app (the mount's uid lists) can share this key without going through the
+/// WebView-facing name check, which exists to constrain what the renderer may name.
+pub(crate) fn write_sealed(app: &AppHandle, file: &str, value: &str) -> Result<(), String> {
+    let path = app_dir(app)?.join(file);
+    let blob = seal(&data_key(app)?, value.as_bytes())?;
     fs::write(path, blob).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn store_get(app: AppHandle, name: String) -> Result<Option<String>, String> {
-    let path = app_dir(&app)?.join(safe_name(&name)?);
+/// Read one sealed text file back. A blob that cannot be opened (tampered, or
+/// written under a different key) is reported as absent rather than as an error, so
+/// every caller falls back to its own empty state instead of failing: the app falls
+/// back to sign-in, and the mount to "nothing recorded yet".
+pub(crate) fn read_sealed(app: &AppHandle, file: &str) -> Result<Option<String>, String> {
+    let path = app_dir(app)?.join(file);
     if !path.exists() {
         return Ok(None);
     }
     let blob = fs::read(path).map_err(|e| e.to_string())?;
-    // A blob we cannot open (tampered, or written under a different key) is
-    // treated as absent rather than fatal, so the app falls back to sign-in.
-    match unseal(&data_key(&app)?, &blob) {
+    match unseal(&data_key(app)?, &blob) {
         Ok(plain) => Ok(Some(String::from_utf8_lossy(&plain).into_owned())),
         Err(_) => Ok(None),
     }
+}
+
+#[tauri::command]
+pub fn store_set(app: AppHandle, name: String, value: String) -> Result<(), String> {
+    write_sealed(&app, &safe_name(&name)?, &value)
+}
+
+#[tauri::command]
+pub fn store_get(app: AppHandle, name: String) -> Result<Option<String>, String> {
+    read_sealed(&app, &safe_name(&name)?)
 }
 
 #[tauri::command]
@@ -154,12 +175,50 @@ pub fn store_del(app: AppHandle, name: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Handed to the sidecar over stdin at spawn: only the app directory. The
-/// sidecar derives its own AES key from the user's password (via the vault) and
-/// encrypts its caches and session into this directory. No key is sent here.
+/// A random key, sealed at rest with DPAPI, that exists purely so the vault's own
+/// metadata does not sit on disk in the clear.
+///
+/// The vault derives the sidecar's data key from the user's Proton password and a
+/// random salt. Left readable, that salt is enough to mount an offline attack on the
+/// password itself: guess, derive, compare, with no server to rate-limit it. And the
+/// password is the Proton ACCOUNT password, so what is at stake is not the photo
+/// cache but Mail, Calendar and account recovery.
+///
+/// Sealing the salt removes the attack from anyone holding only the files (a stolen
+/// laptop, a backup image, a resold drive), because DPAPI will not unseal this key
+/// for them. It does not defend against code already running as this Windows user;
+/// only breaking the password-to-key binding would, and that would cost the vault's
+/// ability to verify a password locally at all.
+fn vault_meta_key(app: &AppHandle) -> Result<String, String> {
+    let path = app_dir(app)?.join(VAULT_KEY_FILE);
+    let raw = if path.exists() {
+        let sealed = fs::read(&path).map_err(|e| e.to_string())?;
+        decrypt_data(&sealed, Scope::User, Some(VAULT_KEY_ENTROPY))
+            .map_err(|e| format!("could not unseal the vault key: {e}"))?
+    } else {
+        let key = Aes256Gcm::generate_key(&mut OsRng).to_vec();
+        let sealed = encrypt_data(&key, Scope::User, Some(VAULT_KEY_ENTROPY))
+            .map_err(|e| format!("could not seal the vault key: {e}"))?;
+        fs::write(&path, sealed).map_err(|e| e.to_string())?;
+        key
+    };
+    if raw.len() != 32 {
+        return Err("stored vault key is corrupt".into());
+    }
+    // Hex rather than base64: the JSON hop needs some text form, and hex costs no
+    // dependency and cannot be confused with the base64 uids elsewhere in the logs.
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Handed to the sidecar over stdin at spawn: the app directory, and the key that
+/// seals the vault's metadata. The sidecar still derives its own AES data key from
+/// the user's password, so the caches and the session stay shut until unlock; this
+/// key only keeps the salt and verifier that guard that derivation off the disk in
+/// readable form.
 pub fn sidecar_init_params(app: &AppHandle) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "dataDir": app_dir(app)?.to_string_lossy(),
+        "vaultKey": vault_meta_key(app)?,
     }))
 }
 

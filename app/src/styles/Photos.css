@@ -102,35 +102,6 @@
   flex: 1;
 }
 
-.g-zoom {
-  display: inline-flex;
-  align-items: center;
-  background: var(--pill-bg);
-  border: 0.5px solid var(--border);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.g-zoom button {
-  width: 34px;
-  height: 34px;
-  background: none;
-  border: none;
-  color: var(--fg-dim);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.g-zoom button:hover:not(:disabled) {
-  color: var(--fg-primary);
-}
-
-.g-zoom button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
 .g-avatar {
   width: 34px;
   height: 34px;
@@ -173,6 +144,16 @@
 
 .g-chip:hover {
   color: var(--fg-primary);
+}
+
+/* Empty trash: reads as the destructive thing it is, before it is ever clicked. */
+.g-chip.danger {
+  color: var(--status-error);
+}
+.g-chip.danger:hover {
+  background: var(--status-error);
+  border-color: transparent;
+  color: #fff;
 }
 
 .g-chip.sel {
@@ -314,34 +295,79 @@
   height: 28px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.55);
+  color: #fff;
   display: grid;
   place-items: center;
   pointer-events: none;
 }
 
-.g-fav {
+/* ---- Tile corner badges ----
+   Ported from the Android grid tile so a photo reads the same on both: an 18px box of
+   black at 55%, a 4px radius, and an 11px mark inside it. Black-and-white on purpose
+   rather than themed — it has to stay legible over any photo, in either theme, which is
+   the same reason the phone draws it this way. The corners are divided the way Android
+   divides them: the pin and the duration bottom-start, the cloud and the type mark
+   bottom-end, the select dot top-start and the play icon in the middle. */
+.g-tilebadge {
   position: absolute;
-  bottom: 6px;
-  right: 6px;
-  color: #fff;
-  font-size: 11px;
-  line-height: 1;
-  background: rgba(0, 0, 0, 0.55);
+  bottom: 4px;
+  height: 18px;
+  min-width: 18px;
   border-radius: 4px;
-  padding: 3px 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   pointer-events: none;
 }
 
-/* Badge on photos kept offline (hydrated) — a green cloud, bottom-right. */
-.g-local {
+/* The pin and the duration share this row, so they sit beside each other rather than on
+   top of each other, and it clears the bottom-end corner. */
+.g-badgerow {
   position: absolute;
-  bottom: 6px;
-  right: 6px;
-  color: #57d38c;
-  font-size: 14px;
-  line-height: 1;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+  left: 4px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
   pointer-events: none;
+}
+.g-badgerow .g-tilebadge {
+  position: static;
+  bottom: auto;
+}
+
+/* A video's length. `line-height: 1` is what centres the number in the pill — the
+   phone drops the font's own extra padding for the same reason. */
+.g-duration {
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Green cloud: this photo is in the Proton Photos folder on this PC as well as in
+   Drive. The same green the phone marks a synced photo with. */
+.g-cloud {
+  right: 4px;
+  color: var(--status-synced);
+}
+
+/* The type mark, and the heart in front of it. It moves in beside the cloud when there
+   is one to clear (18px box + 4px inset + a 3px gap) and takes the corner when there
+   is not, exactly as the phone places it. */
+.g-typepill {
+  right: 4px;
+  gap: 3px;
+  padding: 0 3.5px;
+}
+.g-typepill.beside-cloud {
+  right: 25px;
+}
+.g-typepill span {
+  display: flex;
+  align-items: center;
 }
 
 /* ---- Bottom dock ---- */
@@ -398,6 +424,22 @@
   color: var(--fg-dim);
   font-size: 14px;
   margin: 8px 0 0;
+}
+
+.g-empty-btn {
+  height: 34px;
+  margin: 18px 0 0;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.g-empty-btn:hover {
+  filter: brightness(1.08);
 }
 
 .g-error {
@@ -564,6 +606,11 @@
   gap: 18px;
   padding-top: 4px;
 }
+/* Shared is the one screen that holds albums and loose photos at once, and the
+   tiles need air under the cards or the two runs read as one. */
+.g-albums + .g-grid {
+  margin-top: 22px;
+}
 .g-album {
   display: flex;
   flex-direction: column;
@@ -582,8 +629,32 @@
   overflow: hidden;
   background: var(--bg2);
 }
-/* Per-album "keep on this device" toggle, top-right of the cover. Shown on hover,
-   and stays lit (green) while the album is kept offline. */
+
+/* The first tile in the grid makes a new album, so the shape matches a cover
+   and only the dashed edge says it is not one. */
+.g-album-newbox {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  color: var(--fg-dim);
+}
+.g-album-new:hover .g-album-newbox {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.g-album-new:hover .g-album-name {
+  color: var(--accent);
+}
+.g-album-newplus {
+  font-size: 30px;
+  font-weight: 300;
+  line-height: 1;
+}
+/* Per-album download toggle, top-right of the cover. Shown on hover, and stays lit
+   (green) while the album keeps itself downloaded. */
 .g-album-sync {
   position: absolute;
   top: 8px;
@@ -640,6 +711,44 @@
 }
 
 /* ---- Shared ---- */
+
+/* The by-me / with-me pill, mirroring Android's: the same 38px accent-washed
+   pill, the direction arrow in the accent, and the swap mark dim behind the
+   label. `--surface-2` is the exact colour Android fills it with. */
+.g-sharedpill {
+  gap: 6px;
+}
+.g-shareway {
+  display: inline-flex;
+  color: var(--accent);
+}
+.g-shareswap {
+  display: inline-flex;
+  color: var(--fg-dim);
+}
+
+/* Trash's header: the name and the count, drawn with the chips' own pill
+   vocabulary but standing for a fact rather than a control, so neither invites a
+   click the way the chip beside them does. */
+.g-headpill {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border: 0.5px solid var(--border);
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.g-headpill.count {
+  color: var(--fg-dim);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
 .g-shared-badges {
   position: absolute;
   top: 6px;
@@ -654,6 +763,26 @@
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.55);
   color: #fff;
+}
+
+/* Managing a share is the only reason to click a tile that is not a photo, so it
+   sits opposite the badges and stays out of the way of opening one. */
+.g-shared-manage {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+.g-shared-manage:hover {
+  background: var(--accent);
 }
 .g-cell-name {
   position: absolute;
@@ -801,51 +930,134 @@
   font-size: 13px;
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
 }
+/* The save-to-folder toast grows from the plain pill into a short column: the count
+   over the determinate bar, wide enough to read the progress at a glance. */
+.g-toast-save {
+  min-width: 208px;
+}
+/* Centred across the whole window, not from its middle outwards: with `left: 50%`
+   the row could only ever grow into the half to its right, so it ran out of room at
+   twice the width it should have. `overflow: hidden` is what the fitting measures
+   against, and it is why an overspilling row is never seen mid-adjustment. */
 .g-selbar {
   position: fixed;
-  left: 50%;
+  left: 0;
+  right: 0;
   bottom: 84px;
-  transform: translateX(-50%);
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  overflow: hidden;
   z-index: 820;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px 8px 16px;
-  border-radius: 999px;
+  gap: 4px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 26px;
   background: rgba(var(--surface-rgb), 0.94);
   border: 0.5px solid var(--border);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
 }
 .g-selcount {
+  flex: 0 0 auto;
+  margin-right: 4px;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--fg-primary);
 }
+/* The divider travels with the action it sets apart, so it can go into the
+   overflow menu with it instead of being left behind on the row. */
+.g-selslot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* The mark on top and the word underneath, so the word is the part that can go.
+   Nothing shrinks: a button squeezed narrower than its label wraps the text inside
+   a box that cannot grow, which is what the row used to do. */
 .g-selbtn {
-  height: 30px;
-  padding: 0 14px;
-  border-radius: 999px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 56px;
+  height: 48px;
+  padding: 0 10px;
+  border-radius: 14px;
   border: 0.5px solid var(--border);
   background: var(--line-soft);
   color: var(--fg-dim);
   font-size: 12.5px;
   font-weight: 500;
+  white-space: nowrap;
   cursor: pointer;
 }
-.g-selbtn:hover {
+.g-selicon {
+  display: grid;
+  place-items: center;
+  height: 18px;
+}
+.g-sellabel {
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+/* Too narrow for words: the glyphs carry the row on their own, and the name each
+   one lost is still on the button for the pointer and the screen reader. */
+.g-selbar[data-tier="icons"] .g-sellabel {
+  display: none;
+}
+.g-selbar[data-tier="icons"] .g-selbtn {
+  min-width: 40px;
+  height: 40px;
+  padding: 0 11px;
+  border-radius: 12px;
+}
+.g-selbtn:hover:not(:disabled) {
   color: var(--fg-primary);
 }
-.g-selbtn.danger:hover {
+.g-selbtn.danger:hover:not(:disabled) {
   background: var(--status-error);
   color: #fff;
   border-color: transparent;
 }
 
+/* Restore leads in the trash, so it is the one filled button in the bar. */
+.g-selbtn.primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+.g-selbtn.primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.08);
+}
+
+/* An action already running: the rest of the bar stands down with it. */
+.g-selbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Sets deleting for good apart from everything that can be taken back. */
+.g-selsep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 26px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
 /* Cancel-selection button: leading ✕, the way a selection bar should read. */
 .g-selx {
-  width: 30px;
-  height: 30px;
-  margin-left: -6px;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  margin-left: -4px;
   display: grid;
   place-items: center;
   border: none;
@@ -911,4 +1123,51 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 34ch;
+}
+
+/* A title that is only a title: same place on the row as the renameable one,
+   without the padding that makes that one look pressable. */
+.g-crumbplain {
+  padding: 3px 8px;
+}
+
+/* Renaming is the album's own name, so it reads as the title until it is
+   pointed at. The pencil is the only standing hint, and it keeps the dim
+   weight of the controls either side of it. */
+.g-albumname {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.g-albumname:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--fg-primary);
+}
+.g-albumname:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Deleting the album is an icon on the same row, sized to the back pill. It
+   earns the destructive colour on the way to being clicked, not before. */
+.g-albumdel {
+  width: 34px;
+  height: 34px;
+}
+.g-albumdel:hover:not(:disabled) {
+  background: var(--status-error);
+  border-color: transparent;
+  color: #fff;
+}
+.g-albumdel:disabled {
+  cursor: default;
+  opacity: 0.5;
 }

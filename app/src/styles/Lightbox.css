@@ -32,6 +32,29 @@
   backdrop-filter: blur(4px);
   user-select: none;
 }
+/* A third row for the filmstrip, and only when there is one: a viewer over a single
+   item keeps the whole window for the picture. */
+.lbx.with-strip {
+  grid-template-rows: 56px minmax(0, 1fr) auto;
+}
+
+/* When the viewer is the whole of the window, this bar is the window's chrome, so
+   it follows the title bar's shape rather than the viewer's: controls flush in the
+   corner, and the backdrop rounded and bordered like the shell it is standing in for
+   instead of squaring off the window.
+
+   Opaque, and with nothing to blur. A viewer over the app is a scrim, and its own
+   translucency reads against the app underneath; standing alone in a transparent
+   window there is only the desktop under it, which would show through. */
+.lbx.owns-window {
+  border-radius: 12px;
+  border: 1px solid var(--surface);
+  background: rgb(6, 6, 8);
+  backdrop-filter: none;
+}
+.lbx.owns-window .lbx-bar {
+  padding-right: 0;
+}
 
 /* ---- Top bar ---- */
 /* Actions left, file name centred, close right. No rule under it. */
@@ -90,6 +113,12 @@
   outline: none;
 }
 
+/* Carries the tooltip for a button that may be disabled, so it has to take the
+   button's own place in the toolbar's flex row rather than add a box of its own. */
+.lbx-ibtn-wrap {
+  display: inline-flex;
+}
+
 .lbx-ibtn {
   width: 34px;
   height: 34px;
@@ -135,6 +164,22 @@
   font-size: 12px;
 }
 
+/* Where the error sits, for something that is not one: an upload in progress,
+   or the result it came to. */
+.lbx-notice {
+  position: absolute;
+  top: 66px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: var(--pill-bg);
+  border: 0.5px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
 /* ---- Stage ---- */
 /* The viewer fills this and does its own fitting, padding and zooming. */
 .lbx-stage {
@@ -145,10 +190,6 @@
   overflow: hidden;
   box-sizing: border-box;
   transition: padding-right 0.16s ease;
-}
-/* Make room for the drawer instead of hiding the photo behind it. */
-.lbx.with-details .lbx-stage {
-  padding-right: 340px;
 }
 .lbx-img {
   max-width: 100%;
@@ -199,6 +240,145 @@
   font-size: 13.5px;
 }
 
+/* ---- Video controls ---- */
+/* The Android viewer's control pill, in the selection bar's shape: the same radius,
+   the same near-opaque surface, the same hairline and shadow. Android lets its pill
+   run the width of the screen, which on a desktop window would stretch a scrub track
+   across a metre of glass, so it is capped and centred instead.
+
+   Near-white in the light theme, exactly as the Android pill goes, which is why the
+   marks on it are drawn in --fg-primary rather than white. */
+.lbx-vbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 16px;
+  /* Above the nav arrows, which are at 2. */
+  z-index: 3;
+  margin: 0 auto;
+  box-sizing: border-box;
+  width: min(720px, calc(100% - 36px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 26px;
+  background: rgba(var(--surface-rgb), 0.94);
+  border: 0.5px solid var(--border);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+/* Out of the way while a clip plays untouched. Nothing under it stays clickable, so
+   the stage behind takes the click and closes the viewer the way bare glass does. */
+.lbx-vbar.idle {
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+}
+
+.lbx-vbtn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.lbx-vbtn:hover {
+  background: var(--line-06);
+}
+/* The frame steps sit beside the track rather than lead the bar, so they read as the
+   smaller pair they are on Android. */
+.lbx-vbtn.step {
+  width: 26px;
+  height: 26px;
+}
+
+.lbx-vtrack {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 40px;
+  height: 26px;
+  cursor: pointer;
+  /* The drag is pointer-captured, so the surface must not hand the gesture away. */
+  touch-action: none;
+}
+/* The parts are painted, not hit: the whole height of the track takes the pointer, so
+   a drag never falls between the groove and the knob. */
+.lbx-vtrack-line,
+.lbx-vtrack-fill {
+  position: absolute;
+  top: 50%;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.lbx-vtrack-line {
+  left: 0;
+  right: 0;
+  background: var(--surface-2);
+}
+.lbx-vtrack-fill {
+  left: 0;
+  background: var(--fg-primary);
+}
+.lbx-vtrack-knob {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  border-radius: 999px;
+  background: var(--fg-primary);
+  pointer-events: none;
+}
+
+.lbx-vtime {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-primary);
+  /* So a running clock does not shuffle the track a pixel at a time. */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---- Stage message ---- */
+/* Nothing to draw and something to say instead: a file that has gone, or a
+   format Windows itself has no decoder for. */
+.lbx-stage-msg {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 0 48px;
+  text-align: center;
+}
+.lbx-stage-msg-text {
+  margin: 0;
+  max-width: 52ch;
+  color: var(--fg-primary);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.lbx-stage-msg-detail {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--fg-mute);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .lbx-nav {
   position: absolute;
   top: 50%;
@@ -224,6 +404,181 @@
 }
 .lbx-nav.next {
   right: 18px;
+}
+
+/* ---- Filmstrip ---- */
+/* The Android viewer's strip, one for one: 54px tiles, 5px between them, 16px at each
+   end, the current one ringed in white at full opacity and the rest at 45%.
+
+   Only the tiles on screen are in the document, so the rail carries the full width and
+   each tile is placed at its own offset inside it. Without that, a folder of fifty
+   thousand photos would be fifty thousand elements. */
+.lbx-strip {
+  grid-row: 3;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 10px 0 14px;
+  scrollbar-width: none;
+}
+.lbx-strip::-webkit-scrollbar {
+  display: none;
+}
+.lbx-strip-rail {
+  position: relative;
+  height: 54px;
+}
+.lbx-strip-tile {
+  position: absolute;
+  top: 0;
+  width: 54px;
+  height: 54px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--bg2);
+  overflow: hidden;
+  cursor: pointer;
+  opacity: 0.45;
+}
+.lbx-strip-tile:hover {
+  opacity: 0.75;
+}
+/* Instant, as on Android: no scale, no transition, and white in both themes rather
+   than the accent, so the ring reads against any photo under it. */
+.lbx-strip-tile.cur {
+  opacity: 1;
+  box-shadow: inset 0 0 0 2px #fff;
+}
+.lbx-strip-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  -webkit-user-drag: none;
+}
+/* Android widens the playing item into a scrubber instead of marking it. There is no
+   scrubber here, so a video says so. */
+.lbx-strip-play {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+
+/* ---- Contents ---- */
+.lbx-contents-backdrop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 5;
+}
+.lbx-contents-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(460px, 92vw);
+  height: min(560px, 82vh);
+  padding: 18px 8px 12px 20px;
+  background: var(--surface-deep);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+}
+.lbx-contents-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 12px;
+  margin-bottom: 10px;
+}
+.lbx-contents-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.lbx-contents-count {
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+.lbx-contents-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.lbx-contents-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.lbx-contents-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+.lbx-contents-rail {
+  position: relative;
+}
+.lbx-contents-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 44px;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.lbx-contents-row:hover {
+  background: var(--line-06);
+}
+.lbx-contents-row.cur {
+  background: var(--accent-wash);
+}
+.lbx-contents-thumb {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  background: var(--bg2);
+  overflow: hidden;
+}
+.lbx-contents-name {
+  font-size: 12.5px;
+  color: var(--fg-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lbx-contents-play {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.lbx-contents-size {
+  font-size: 11.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ---- Details popup ---- */

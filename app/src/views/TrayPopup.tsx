@@ -20,11 +20,11 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { OpenWindowIcon, PowerIcon, RefreshIcon, SignOutIcon } from "../components/icons";
+import { LockIcon, OpenWindowIcon, PowerIcon, RefreshIcon, SignOutIcon } from "../components/icons";
 import { rpc } from "../lib/rpc";
 // Reuse the profile menu's account shape, storage formatting and header styles
 // so the popup header is identical to the one inside the main window.
@@ -33,6 +33,36 @@ import { useT } from "../lib/i18n";
 import "../styles/ProfileMenu.css";
 import "../styles/TrayPopup.css";
 
+/** Whether a saved account exists and whether it is unlocked (see the sidecar's `lockStatus`). */
+type LockStatus = { hasVault: boolean; unlocked: boolean; email: string | null };
+
+/**
+ * The popup's account header resolves to exactly one of these. `loading` is the
+ * brief first paint before the auth state is known; the other three are the
+ * definite outcomes. There is deliberately no perpetual spinner: a locked or
+ * signed-out account is a settled state, not a pending one.
+ */
+type AuthView =
+  | { kind: "loading" }
+  | { kind: "signedIn"; account: Account }
+  | { kind: "locked"; email: string | null }
+  | { kind: "signedOut" };
+
+/**
+ * A stand-in account for when the identity is known (the vault is unlocked) but
+ * the Drive figures have not arrived yet. `maxSpace: 0` hides the storage bar, so
+ * the header shows who is signed in without implying that anything is still loading.
+ */
+function accountFromEmail(email: string): Account {
+  return {
+    email,
+    displayName: email,
+    initial: (email.trim()[0] ?? "?").toUpperCase(),
+    usedSpace: 0,
+    maxSpace: 0,
+  };
+}
+
 /**
  * The system-tray menu. Rendered (instead of <App/>) into the transparent,
  * frameless "tray_popup" window. The page body is transparent; this card is the
@@ -40,34 +70,73 @@ import "../styles/TrayPopup.css";
  */
 export function TrayPopup() {
   const t = useT();
-  const [account, setAccount] = useState<Account | null>(null);
+  const [view, setView] = useState<AuthView>({ kind: "loading" });
   const [syncing, setSyncing] = useState(false);
+  // Only the newest refresh may commit: a stale in-flight one (e.g. a slow
+  // getAccountInfo left over from a previous open) must not overwrite the current
+  // state, or a just-switched account could flash back to the old one.
+  const runSeq = useRef(0);
 
-  // Account identity and Drive storage, exactly as the main window's avatar.
-  // The popup window is created before sign-in, so refetch on mount AND every
-  // time the tray reopens it (the host emits "tray-shown" on show).
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const info = await rpc<Account>("getAccountInfo");
-        if (!cancelled) setAccount(info);
-      } catch {
-        /* not signed in yet, or transient: keep the placeholder */
-      }
+  // Derive the header from the real auth state instead of a single account fetch,
+  // so the popup always lands on one of the three definite outcomes. The popup
+  // window is created before sign-in, so this runs on mount AND every time the
+  // tray reopens (the host emits "tray-shown" on show); the latter is what keeps
+  // it in step after a lock, unlock, sign-out or account switch made elsewhere.
+  const refresh = useCallback(async () => {
+    const seq = ++runSeq.current;
+    const stale = () => seq !== runSeq.current;
+
+    let status: LockStatus;
+    try {
+      status = await rpc<LockStatus>("lockStatus");
+    } catch {
+      // The sidecar is momentarily unreachable. Never strand the popup on the
+      // loading skeleton: the first, never-resolved load settles on the neutral
+      // signed-out placeholder, while a later blip keeps the state already shown.
+      setView((prev) => (prev.kind === "loading" ? { kind: "signedOut" } : prev));
+      return;
     }
-    void load();
-    // On each open the host emits "tray-shown": refetch, and pull focus so the
+    if (stale()) return;
+
+    if (!status.hasVault) {
+      setView({ kind: "signedOut" });
+      return;
+    }
+    if (!status.unlocked) {
+      setView({ kind: "locked", email: status.email });
+      return;
+    }
+
+    // Unlocked: show the current identity at once so a previous account can never
+    // linger, but keep a matching one intact so its storage bar does not flicker.
+    // Then fill in the Drive figures.
+    const email = status.email ?? "";
+    setView((prev) =>
+      prev.kind === "signedIn" && prev.account.email === email
+        ? prev
+        : { kind: "signedIn", account: accountFromEmail(email) },
+    );
+    try {
+      const info = await rpc<Account>("getAccountInfo");
+      if (!stale()) setView({ kind: "signedIn", account: info });
+    } catch {
+      // Unlocked, but the storage lookup failed: keep the identity shell. The bar
+      // stays hidden rather than showing a spinner that would never resolve here.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    // On each open the host emits "tray-shown": re-derive, and pull focus so the
     // very first click outside dismisses it (Windows will not focus it on show).
     const unlisten = listen("tray-shown", () => {
-      void load();
+      void refresh();
       void getCurrentWindow().setFocus();
     });
     return () => {
-      cancelled = true;
       void unlisten.then((f) => f());
     };
-  }, []);
+  }, [refresh]);
 
   // Live sync status. Seed it from the host on open (the mount may already be
   // busy), then follow the "mount-busy" transitions the host emits.
@@ -130,6 +199,7 @@ export function TrayPopup() {
     await invoke("quit_app").catch(() => {});
   }
 
+  const account = view.kind === "signedIn" ? view.account : null;
   const fraction = account && account.maxSpace > 0 ? account.usedSpace / account.maxSpace : 0;
   const percent = Math.round(fraction * 100);
 
@@ -137,23 +207,41 @@ export function TrayPopup() {
     <div className="tray-root">
       <div className="tray-card">
         <div className="pm-head">
-          <div className="pm-circle">{account?.initial ?? "?"}</div>
-          <div className="pm-id">
-            {account ? (
-              <>
-                <div className="pm-name">{account.displayName}</div>
-                <div className="pm-email">{account.email}</div>
-              </>
+          <div className="pm-circle">
+            {view.kind === "signedIn" ? (
+              view.account.initial
+            ) : view.kind === "locked" ? (
+              <LockIcon size={18} />
             ) : (
+              "?"
+            )}
+          </div>
+          <div className="pm-id">
+            {view.kind === "loading" ? (
               <>
                 <div className="tray-skeleton tray-skeleton-name" />
                 <div className="tray-skeleton tray-skeleton-email" />
+              </>
+            ) : view.kind === "signedIn" ? (
+              <>
+                <div className="pm-name">{view.account.displayName}</div>
+                <div className="pm-email">{view.account.email}</div>
+              </>
+            ) : view.kind === "locked" ? (
+              <>
+                <div className="pm-name">{view.email ?? t("tray.locked")}</div>
+                <div className="pm-email">{view.email ? t("tray.locked") : t("tray.lockedHint")}</div>
+              </>
+            ) : (
+              <>
+                <div className="pm-name">{t("tray.signedOut")}</div>
+                <div className="pm-email">{t("tray.signedOutHint")}</div>
               </>
             )}
           </div>
         </div>
 
-        {!account ? (
+        {view.kind === "loading" ? (
           <div className="pm-storage">
             <div className="pm-storage-row">
               <span className="pm-dim">{t("profile.storage")}</span>
@@ -162,7 +250,7 @@ export function TrayPopup() {
               <div className="tray-skeleton tray-skeleton-bar" />
             </div>
           </div>
-        ) : account.maxSpace > 0 ? (
+        ) : account && account.maxSpace > 0 ? (
           <div className="pm-storage">
             <div className="pm-storage-row">
               <span>{t("profile.storage")}</span>

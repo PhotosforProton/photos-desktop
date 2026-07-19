@@ -41,7 +41,21 @@ const FIT: View = { scale: 1, x: 0, y: 0 };
  * wheel to zoom around the cursor, drag to pan, double click toggles fit and
  * one-to-one pixels.
  */
-export function PhotoViewer({ src, loading }: { src?: string; loading?: boolean }) {
+export function PhotoViewer({
+  src,
+  loading,
+  photoKey,
+}: {
+  src?: string;
+  loading?: boolean;
+  /**
+   * Which photo `src` belongs to. One photo goes through several sources as it upgrades
+   * to full resolution, and the fit must survive that, so the reset is keyed on the
+   * photo rather than on the source. Callers without one fall back to the source, which
+   * is the old behaviour of resetting on every change.
+   */
+  photoKey?: string;
+}) {
   const t = useT();
   const [view, setView] = useState<View>(FIT);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
@@ -49,11 +63,13 @@ export function PhotoViewer({ src, loading }: { src?: string; loading?: boolean 
   const imgRef = useRef<HTMLImageElement>(null);
   const panRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
 
-  // A new photo always starts fitted.
+  // A new photo always starts fitted. A sharper source for the SAME photo must not
+  // reset it: the user may already have zoomed in, and that is exactly when the
+  // upgrade matters most.
   useEffect(() => {
     setView(FIT);
     setNatural(null);
-  }, [src]);
+  }, [photoKey ?? src]);
 
   const zoomAt = useCallback((clientX: number, clientY: number, factor: number) => {
     setView((v) => {

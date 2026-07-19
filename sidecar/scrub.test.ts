@@ -48,8 +48,36 @@ describe("scrubSecrets", () => {
     expect(out).toContain("algo=aes256");
   });
 
+  it("redacts a base64url token (- and _ instead of + and /)", () => {
+    const s = "[console.info] token: TW9yZVNlY3JldEtleU1hdGVyaWFs-QmFzZTY0dXJsRW5jb2RlZFN0dWZm_SGVyZTEyMw";
+    const out = scrubSecrets(s);
+    expect(out).toContain("[redacted]");
+    expect(out).not.toContain("TW9yZVNlY3JldEtleU1hdGVyaWFs");
+  });
+
+  it("redacts the Windows account name but keeps the rest of the path", () => {
+    const s =
+      "[upload] drain failed: Error: boom\n    at drain (C:\\Users\\jsmith\\AppData\\Local\\Photos for Proton\\sidecar.js:12:9)";
+    const out = scrubSecrets(s);
+    expect(out).not.toContain("jsmith");
+    expect(out).toContain("C:\\Users\\[user]\\AppData\\Local");
+    expect(out).toContain("sidecar.js");
+  });
+
+  it("redacts the account name from an fs error path", () => {
+    const s = "ENOENT: no such file or directory, unlink 'C:/Users/akos.kovacs/AppData/Local/x/session.enc'";
+    const out = scrubSecrets(s);
+    expect(out).not.toContain("akos.kovacs");
+    expect(out).toContain("[user]");
+  });
+
   it("leaves a normal diagnostic line untouched", () => {
     const s = "[sidecar] getTimeline done, 924 items in 812ms";
+    expect(scrubSecrets(s)).toBe(s);
+  });
+
+  it("leaves a normal hydrate diagnostic untouched", () => {
+    const s = "[cloud] hydrate start (size=349828 by=explorer.exe explicit=false)";
     expect(scrubSecrets(s)).toBe(s);
   });
 });

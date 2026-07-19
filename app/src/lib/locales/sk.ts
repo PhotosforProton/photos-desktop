@@ -34,6 +34,7 @@ export const sk: Record<string, string> = {
   "nav.photos": "Fotky",
   "nav.albums": "Albumy",
   "nav.shared": "Zdieľané",
+  "nav.trash": "Kôš",
 
   // App shell
   "app.restoring": "Obnovuje sa relácia…",
@@ -51,6 +52,10 @@ export const sk: Record<string, string> = {
   "tray.syncNow": "Synchronizovať teraz",
   "tray.syncing": "Synchronizuje sa…",
   "tray.synced": "Aktuálne",
+  "tray.locked": "Uzamknuté",
+  "tray.lockedHint": "Otvorte na odomknutie",
+  "tray.signedOut": "Neprihlásené",
+  "tray.signedOutHint": "Otvorte na prihlásenie",
 
   // Login
   "login.subtitle": "Prihláste sa do svojho účtu Proton",
@@ -79,6 +84,9 @@ export const sk: Record<string, string> = {
 
   // Settings
   "settings.title": "Nastavenia",
+  "settings.general": "Všeobecné",
+  "settings.launchAtLogin": "Spúšťať so systémom Windows",
+  "settings.launchAtLoginDesc": "Spustí sa na pozadí po prihlásení do systému Windows a zobrazí iba ikonu na paneli úloh, kým ju neotvoríte.",
   "settings.appearance": "Vzhľad",
   "settings.theme": "Motív",
   "settings.themeDesc": "Systém sa riadi Windowsom a mení sa spolu s ním.",
@@ -110,11 +118,50 @@ export const sk: Record<string, string> = {
     "Pridá do bočného panela Prieskumníka položku Proton Photos s vašimi cloudovými fotkami. Prejaví sa po reštarte.",
   "settings.autoDownload": "Automaticky sťahovať nové fotky",
   "settings.autoDownloadDesc":
-    "Keď sa do knižnice pridávajú nové fotky, automaticky sa v tomto zariadení uchová kópia.",
+    "Keď sa do knižnice pridávajú nové fotky, automaticky sa stiahnu do priečinka Proton Photos.",
+  "settings.autoDownloadNeedsExplorer":
+    "Funguje len so zapnutou položkou „Proton Photos“ v Prieskumníkovi súborov, ktorá je vypnutá. Sťahovanie funguje aj tak: spýta sa vás, kam sa majú fotky uložiť.",
   "settings.restartNeeded": "Reštartujte, aby sa zmena prejavila.",
   "settings.restartNow": "Reštartovať teraz",
+  // File types. The "Open with" entries are the app's own to add and take back out;
+  // the default handler is not, so that half leads out to Windows rather than
+  // pretending to a choice Windows takes from the user alone.
+  "settings.fileTypes": "Typy súborov",
+  "settings.openWith": "Pridať do ponuky „Otvoriť v programe“",
+  "settings.openWithDesc":
+    "Uvedie Photos for Proton v ponuke Windows „Otvoriť v programe“ pri fotkách JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF a HEIC a pri videách MP4, MOV, M4V a WebM. Po vypnutí sa položky zase odstránia.",
+  "settings.fileTypesFailed": "Typy súborov sa nepodarilo zmeniť. Skúste to znova.",
+  "settings.defaultApp": "Predvolená aplikácia pre fotky a videá",
+  "settings.defaultAppDesc":
+    "Takto sa nič nestane predvoleným: túto voľbu Windows prijme len od vás, nikdy od programu. Vyberte Photos for Proton v nastaveniach Windows v časti Predvolené aplikácie.",
+  "settings.defaultAppOpen": "Otvoriť nastavenia Windows",
+  "settings.defaultAppFailed": "Nastavenia Windows sa nepodarilo otvoriť. Skúste to znova.",
   "settings.lockOnHideDesc":
     "Keď sa okno zavrie do systémovej lišty, aplikácia sa uzamkne a pri ďalšom otvorení si vyžiada heslo.",
+  "settings.storage": "Úložisko",
+  // Two different places a photo can be kept on this machine: encrypted inside the
+  // app, or downloaded into the Proton Photos folder where Windows can read it. The
+  // panel names both rather than adding one number to the other.
+  "settings.downloadedCount.one": "{count} stiahnutá fotka",
+  "settings.downloadedCount.other": "{count} stiahnutých fotiek",
+  "settings.downloadedNone": "Nič nie je stiahnuté",
+  "settings.downloadedDesc":
+    "Stiahnuté fotky sú bežné súbory v priečinku Proton Photos, takže ich dokáže prečítať vyhľadávanie Windows aj iné programy. Uvoľnenie odstráni len tieto miestne kópie a vaše fotky zostávajú v Protone.",
+  "settings.freeUpAll": "Uvoľniť {size}",
+  "settings.freeUpNothing": "Nie je čo uvoľniť",
+  "settings.freeingUp": "Uvoľňovanie…",
+  "settings.storageOffline": "Offline fotky",
+  "settings.storageExplorer": "V Prieskumníkovi súborov",
+  "settings.offlineCount.one": "{count} fotka v aplikácii",
+  "settings.offlineCount.other": "{count} fotiek v aplikácii",
+  "settings.offlineNone": "V aplikácii nie sú uložené žiadne fotky",
+  "settings.offlineDesc":
+    "Fotky označené ako dostupné offline zostávajú zašifrované vo vnútri aplikácie. Otvoria sa aj bez pripojenia a v priečinku Proton Photos sa nikdy nezobrazia, takže ich nič mimo aplikácie neprečíta.",
+  "settings.offlineSaving": "Ukladá sa {done}/{total}…",
+  "settings.offlineRemoveAll": "Uvoľniť {size}",
+  "settings.offlineRemoveNothing": "Nie je čo uvoľniť",
+  "settings.offlineRemoving": "Odstraňuje sa…",
+  "settings.freeUpFailed": "Miesto sa nepodarilo uvoľniť. Skúste to znova.",
 
   // Profile menu
   "profile.storage": "Úložisko",
@@ -133,8 +180,6 @@ export const sk: Record<string, string> = {
   "photos.search": "Hľadať",
   "photos.searchPlaceholder": "Hľadať podľa názvu alebo typu súboru…",
   "photos.closeSearch": "Zavrieť vyhľadávanie",
-  "photos.smaller": "Menšie",
-  "photos.bigger": "Väčšie",
   "photos.indexing": "Indexuje sa {done}/{total}",
   "photos.uploadTitle": "Nahrať fotky alebo priečinok ako album",
   "photos.uploadingProgress": "Nahráva sa {progress}",
@@ -145,7 +190,16 @@ export const sk: Record<string, string> = {
   "photos.loadingThumbnails": "Načítavajú sa náhľady…",
   "photos.dropTitle": "Pustite sem pre nahranie",
   "photos.dropSub": "Priečinok sa stane albumom s rovnakým názvom",
-  "photos.offline": "Dostupné offline",
+  "photos.offline": "Dostupné offline, zašifrované v aplikácii",
+  "photos.downloaded": "Stiahnuté do priečinka Proton Photos",
+  "photos.renameTitle": "Premenovať fotku",
+  "photos.namePlaceholder": "Názov súboru",
+
+  // Tile badges
+  "badge.motionPhoto": "Pohyblivá fotka",
+  "badge.panorama": "Panoráma",
+  "badge.raw": "RAW",
+  "badge.favorite": "Obľúbené",
 
   // Search type filters
   "filter.images": "Obrázky",
@@ -175,26 +229,122 @@ export const sk: Record<string, string> = {
   "albums.untitled": "Album bez názvu",
   "albums.empty": "Tento album je prázdny",
   "albums.none": "Zatiaľ žiadne albumy",
-  "albums.noneSub": "Vytvorte album presunutím priečinka na okno.",
-  "albums.keepOffline": "Ponechať tento album v tomto zariadení",
-  "albums.keptOffline": "Ponechané v tomto zariadení (kliknutím zrušíte)",
+  "albums.noneSub": "Vytvorte ho tu, alebo presuňte priečinok na okno.",
+  "albums.keepDownloaded": "Stiahnuť tento album do priečinka Proton Photos",
+  "albums.keptDownloaded": "Sťahovanie do priečinka Proton Photos (kliknutím zrušíte)",
+  "albums.freeUpTitle": "Uvoľniť miesto tohto albumu?",
+  "albums.freeUpCount.one":
+    "Album sa už sám nesťahuje. {count} fotka už je v priečinku Proton Photos a môže tu zostať, alebo môžete uvoľniť miesto, ktoré zaberá. V oboch prípadoch zostáva v Protone.",
+  "albums.freeUpCount.other":
+    "Album sa už sám nesťahuje. {count} fotiek už je v priečinku Proton Photos a môžu tu zostať, alebo môžete uvoľniť miesto, ktoré zaberajú. V oboch prípadoch zostávajú v Protone.",
+  "albums.freeUpKeep": "Ponechať stiahnuté",
+  "albums.freeUpConfirm": "Uvoľniť",
+  "albums.newAlbum": "Nový album",
+  "albums.newTitle": "Pomenujte album",
+  "albums.namePlaceholder": "Názov albumu",
+  "albums.create": "Vytvoriť",
+  "albums.createAndAdd": "Vytvoriť a pridať",
+  "albums.rename": "Premenovať",
+  "albums.renameTitle": "Premenovať album",
+  "albums.share": "Zdieľať album",
+  "albums.delete": "Zmazať album",
+  "albums.deleted": "Album zmazaný",
+  "albums.addTitle": "Pridať do albumu",
+  "albums.addCount.one": "Vyberte, kam patrí {count} fotka.",
+  "albums.addCount.other": "Vyberte, kam patria fotky ({count}).",
+  "albums.added": "Pridané: {count}",
+  "albums.addPartial": "Pridané {ok}, zlyhalo {failed}",
+  "albums.removed": "Odobraté z albumu: {count}",
+  "albums.removePartial": "Odobraté {ok}, zlyhalo {failed}",
+  "albums.coverSet": "Obal aktualizovaný",
+  "albums.strandedTitle.one": "{count} fotka je len v tomto albume",
+  "albums.strandedTitle.other": "Len v tomto albume sú fotky ({count})",
+  "albums.strandedMsg.one":
+    "Nie je na vašej časovej osi, takže so zmazaním albumu zmizne aj ona. Uložte ju na časovú os, aby vám zostala.",
+  "albums.strandedMsg.other":
+    "Nie sú na vašej časovej osi, takže so zmazaním albumu zmiznú aj ony. Uložte ich na časovú os, aby vám zostali.",
+  "albums.savePhotos": "Uložiť na časovú os",
+  "albums.deletePhotosToo": "Zmazať aj fotky",
 
   // Shared
   "shared.byMe": "Zdieľané mnou",
   "shared.withMe": "Zdieľané so mnou",
+  "shared.flip": "Prepnúť medzi zdieľanými mnou a zdieľanými so mnou",
   "shared.emptyByTitle": "Nič nezdieľate",
   "shared.emptyWithTitle": "Nič vám nebolo zdieľané",
   "shared.emptyBySub": "Fotky a albumy, ktoré zdieľate, sa objavia tu.",
   "shared.emptyWithSub": "Fotky a albumy, ktoré s vami zdieľajú ostatní, sa objavia tu.",
   "shared.publicLink": "Zdieľané cez verejný odkaz",
   "shared.album": "Album",
+  "shared.manage": "Spravovať zdieľanie",
+  "shared.back": "Späť na zdieľané",
+
+  // Share dialog. A public link's URL carries the secret that decrypts what it
+  // points at, so copying it whole is the whole point of the link section. A
+  // link's password is never read back, so the dialog reports whether one is set
+  // rather than showing it.
+  "share.title": "Zdieľanie",
+  "share.linkTitle": "Verejný odkaz",
+  "share.linkDesc": "Túto fotku môže otvoriť ktokoľvek, kto má odkaz.",
+  "share.createLink": "Vytvoriť odkaz",
+  "share.copyLink": "Kopírovať odkaz",
+  "share.copied": "Skopírované",
+  "share.removeLink": "Odstrániť odkaz",
+  "share.passwordLabel": "Heslo",
+  "share.passwordSet": "Potrebné na otvorenie",
+  "share.passwordNone": "Nenastavené",
+  "share.passwordPlaceholder": "Nové heslo",
+  "share.expiryLabel": "Vyprší",
+  "share.expiryNever": "Nikdy",
+  "share.expiryPast": "Vyberte dátum v budúcnosti.",
+  "share.add": "Pridať",
+  "share.change": "Zmeniť",
+  "share.set": "Nastaviť",
+  "share.save": "Uložiť",
+  "share.albumInviteOnly": "Albumy sa zdieľajú pozvánkou, nie verejným odkazom.",
+  "share.peopleTitle": "Ľudia",
+  "share.emailPlaceholder": "E-mailová adresa",
+  "share.invite": "Pozvať",
+  "share.roleViewer": "Prezerajúci",
+  "share.roleEditor": "Editor",
+  "share.stateInvited": "Pozvaný",
+  "share.stateExternal": "Pozvaný (bez konta Proton)",
+  "share.remove": "Odstrániť",
+  "share.noPeople": "Zatiaľ nikto",
+  "share.stopSharing": "Ukončiť zdieľanie",
+  "share.notOwned": "Toto bolo zdieľané s vami. Iba vlastník môže zmeniť, kto k tomu má prístup.",
+  "share.badEmail": "Toto nevyzerá ako e-mailová adresa.",
+  "share.copyFailed": "Odkaz sa nepodarilo skopírovať",
+  "share.failed": "Zdieľanie sa nepodarilo zmeniť",
+  "share.working": "Prebieha…",
+
+  // Trash
+  "trash.emptyTitle": "Kôš je prázdny",
+  "trash.emptySub": "Fotky presunuté do koša sa zobrazia tu a môžete ich obnoviť.",
+  "trash.emptyAction": "Vysypať kôš",
+  "trash.moved": "Presunuté do koša: {count}",
+  "trash.movedPartial": "Presunuté do koša: {ok}, zlyhalo {failed}",
+  "trash.restored": "Obnovené: {count}",
+  "trash.deleted": "Trvalo zmazané: {count}",
+  "trash.emptied": "Kôš vysypaný",
+  "trash.partial": "Hotové {ok}, zlyhalo {failed}",
 
   // Photo viewer / lightbox
   "viewer.details": "Podrobnosti",
-  "viewer.download": "Ponechať offline",
-  "viewer.freeUp": "Uvoľniť miesto",
+  "viewer.offlineAdd": "Ponechať offline kópiu, zašifrovanú v aplikácii",
+  "viewer.offlineRemove": "Odstrániť offline kópiu",
+  "viewer.download": "Stiahnuť do priečinka Proton Photos",
+  "viewer.saveToFolder": "Uložiť kópiu na zvolené miesto",
+  "viewer.freeUp": "Odstrániť lokálnu kópiu a uvoľniť miesto",
   "viewer.detailsShortcut": "Podrobnosti (I)",
+  "viewer.contents": "Obsah",
+  "viewer.contentsShortcut": "Obsah (L)",
+  "viewer.filmstrip": "Susedné položky",
+  "viewer.position": "{n} z {total}",
+  "viewer.favoriteShortcut": "Pridať do obľúbených (F)",
+  "viewer.unfavoriteShortcut": "Odobrať z obľúbených (F)",
   "viewer.trashShortcut": "Presunúť do koša (Del)",
+  "viewer.shareShortcut": "Zdieľať (S)",
   "viewer.rename": "Kliknutím premenujete",
   "viewer.closeShortcut": "Zavrieť (Esc)",
   "viewer.prev": "Predchádzajúca (←)",
@@ -206,20 +356,61 @@ export const sk: Record<string, string> = {
   "viewer.added": "Pridané",
   "viewer.modified": "Upravené",
   "viewer.size": "Veľkosť",
-  "viewer.onServer": "Na serveri",
+  "viewer.onServer": "Využité miesto",
   "viewer.albums": "Albumy",
   "viewer.shared": "Zdieľané",
   "viewer.sharedPublic": "Verejný odkaz",
   "viewer.sharedPeople": "S ľuďmi",
   "viewer.sharedNo": "Nie",
   "viewer.unverified": " (neoverené)",
-  "viewer.trashFailed": "nepodarilo sa presunúť do koša",
+  "viewer.trashFailed": "Túto fotku sa nepodarilo presunúť do koša.",
+  "viewer.favoriteFailed": "Obľúbené sa nepodarilo aktualizovať.",
+  "viewer.downloadFailed": "Túto fotku sa nepodarilo stiahnuť.",
   "viewer.zoomOut": "Oddialiť",
   "viewer.zoomIn": "Priblížiť",
   "viewer.resetFit": "Prispôsobiť veľkosti",
   "viewer.videoLoading": "Načítava sa video…",
-  "viewer.videoError": "Tento formát videa sa tu nedá prehrať. Stiahnite ho na prehratie.",
-  "viewer.videoTooLarge": "Toto video je príliš veľké na prehratie tu. Stiahnite ho na prehratie.",
+  "viewer.videoError":
+    "Tento formát videa sa tu nedá prehrať. Stiahnite si ho a prehrajte v inom prehrávači.",
+  "viewer.videoTooLarge":
+    "Toto video je príliš veľké na prehratie tu. Stiahnite si ho a prehrajte v inom prehrávači.",
+
+  // The viewer's own video controls, which stand in for the browser's.
+  "viewer.videoPlay": "Prehrať (medzerník)",
+  "viewer.videoPause": "Pozastaviť (medzerník)",
+  "viewer.videoStepBack": "Predchádzajúca snímka",
+  "viewer.videoStepForward": "Ďalšia snímka",
+  "viewer.videoSeek": "Pozícia prehrávania",
+  "viewer.videoMute": "Stlmiť",
+  "viewer.videoUnmute": "Zrušiť stlmenie",
+
+  // Local file viewer: a file opened from File Explorer, which the app can show
+  // with nobody signed in. Everything both viewers say alike comes from above.
+  "local.camera": "Fotoaparát",
+  "local.created": "Vytvorené",
+  "local.path": "Umiestnenie",
+  "local.upload": "Nahrať do Protonu",
+  "local.uploadUnsupported": "Proton neprijíma tento typ súboru",
+  "local.uploading": "Nahrávanie…",
+  "local.uploaded": "Uložené do Protonu",
+  "local.uploadSkipped": "Už uložené",
+  "local.uploadFailed": "Nahrávanie zlyhalo. Skúste to znova.",
+  "local.delete": "Odstrániť",
+  "local.deleteTitle": "Odstrániť tento súbor?",
+  "local.deleteMessage": "Súbor „{name}“ sa presunie do koša.",
+  "local.notFound": "Tento súbor bol presunutý alebo odstránený.",
+  "local.unreadable":
+    "Tento súbor sa nepodarilo prečítať. Možno ho má otvorený iný program, alebo je mimo dosahu tohto účtu.",
+  "local.openFailed": "Tento súbor sa nepodarilo otvoriť.",
+  "local.decodeFailed":
+    "Túto fotku sa nepodarilo prečítať. Súbor môže byť poškodený alebo neúplný.",
+  "local.videoUnsupported": "Tento formát videa sa tu nedá prehrať. Otvorte ho v inom prehrávači.",
+  "local.noCodec":
+    "Windows nemá pre tento formát dekodér, takže sa tu nedá zobraziť. V Microsoft Store je to, čo pri niektorých chýba: rozšírenia HEIF a HEVC pre fotky HEIC a Raw Image Extension pre surové súbory z fotoaparátov.",
+  "local.signInTitle": "Prihláste sa na nahrávanie",
+  "local.signInBody":
+    "Otvorí sa okno aplikácie, kde sa môžete prihlásiť. Tento súbor zostane otvorený tu.",
+  "local.signInAction": "Prihlásiť sa",
 
   // Upload panel
   "upload.title": "Nahrať",
@@ -246,23 +437,108 @@ export const sk: Record<string, string> = {
   "selection.count.one": "Vybraná {count} fotka",
   "selection.count.other": "Vybraných {count} fotiek",
   "selection.trash": "Do koša",
+  "selection.restore": "Obnoviť",
+  "selection.deleteForever": "Zmazať navždy",
+  "selection.more": "Ďalšie",
   "selection.download": "Stiahnuť",
   "selection.freeUp": "Uvoľniť",
+  "selection.addToAlbum": "Pridať do albumu",
+  "selection.removeFromAlbum": "Odobrať z albumu",
+  "selection.setCover": "Nastaviť ako obal",
+  "selection.rename": "Premenovať",
+  "selection.share": "Zdieľať",
+  "selection.favorite": "Pridať do obľúbených",
+  "selection.unfavorite": "Odobrať z obľúbených",
+  "selection.offlineAdd": "Dostupné offline",
+  "selection.offlineRemove": "Odstrániť offline kópiu",
+  // Download: the copy that lands in the Proton Photos folder, where Windows and any
+  // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "Uvoľnené: {count}",
+  "download.freedUpNone": "Nič sa neuvoľnilo",
   "download.notDownloaded": "Nie je nič stiahnuté na uvoľnenie",
   "download.running": "Sťahuje sa…",
-  "download.done": "Ponechané offline: {count}",
-  "download.alreadyOffline": "Už dostupné offline",
+  "download.progress": "Sťahuje sa {done}/{total}…",
+  "download.done": "Stiahnuté do priečinka Proton Photos: {count}",
+  "download.donePartial": "Stiahnuté: {ok} z {total}",
+  "download.doneNone":
+    "Nič nebolo stiahnuté. Priečinok Proton Photos možno ešte nie je pripravený.",
+  "download.alreadyDownloaded": "Už stiahnuté",
+  "download.saved": "Uložené do priečinka: {count}",
   "download.partial": "Uložené {ok}, zlyhalo {failed}",
+
+  // Available offline: the app's own encrypted copy, which is not the Proton Photos
+  // folder. These say where the copy went, so the two are never mistaken for one another.
+  "offline.added.one": "{count} fotka sa ukladá na použitie offline",
+  "offline.added.other": "{count} fotiek sa ukladá na použitie offline",
+  "offline.removed.one": "Odstránená {count} offline kópia",
+  "offline.removed.other": "Odstránených {count} offline kópií",
+  "offline.alreadyOffline": "Už dostupné offline",
+  "offline.noneOffline": "Nie sú žiadne offline kópie na odstránenie",
+  "offline.failed": "nepodarilo sa uložiť na použitie offline",
 
   // Trash confirmation
   "confirm.trashTitle": "Presunúť do koša?",
   "confirm.trashConfirm": "Presunúť do koša",
   "confirm.trashCount.one":
-    "{count} fotka sa presunie do koša. Môžete ju obnoviť z Proton Drive.",
+    "{count} fotka sa presunie do koša. Môžete ju obnoviť na karte Kôš.",
   "confirm.trashCount.other":
-    "{count} fotiek sa presunie do koša. Môžete ich obnoviť z Proton Drive.",
+    "{count} fotiek sa presunie do koša. Môžete ich obnoviť na karte Kôš.",
   "confirm.trashName":
-    '„{name}“ sa presunie do koša. Môžete ju obnoviť z Proton Drive.',
+    "„{name}“ sa presunie do koša. Môžete ju obnoviť na karte Kôš.",
   "confirm.thisPhoto": "Táto fotka",
+
+  // Remove from album. The photos stay in Photos; only the album loses them.
+  "confirm.removeTitle": "Odobrať z albumu?",
+  "confirm.removeConfirm": "Odobrať",
+  "confirm.removeCount.one":
+    "{count} fotka zmizne z tohto albumu, ale zostane na vašej časovej osi.",
+  "confirm.removeCount.other":
+    "Fotky ({count}) zmiznú z tohto albumu, ale zostanú na vašej časovej osi.",
+
+  // Delete-forever confirmation. Nothing in the app or at Proton undoes these.
+  "confirm.deleteTitle": "Zmazať navždy?",
+  "confirm.deleteConfirm": "Zmazať navždy",
+  "confirm.deleteCount.one":
+    "{count} fotka bude trvalo zmazaná z Protonu. Túto akciu nemožno vrátiť späť.",
+  "confirm.deleteCount.other":
+    "{count} fotiek bude trvalo zmazaných z Protonu. Túto akciu nemožno vrátiť späť.",
+  "confirm.emptyTitle": "Vysypať kôš?",
+  "confirm.emptyConfirm": "Zmazať všetko",
+  "confirm.emptyMessage":
+    "Celý obsah koša bude trvalo zmazaný z Protonu. Túto akciu nemožno vrátiť späť.",
+
+  // Deleting an album skips the trash, so the album is gone for good even though
+  // the photos in your timeline are not.
+  "confirm.deleteAlbumTitle": "Zmazať tento album?",
+  "confirm.deleteAlbumMessage":
+    "Album bude zmazaný a nedá sa obnoviť. Fotky na vašej časovej osi zostanú.",
+
+  // Revoking sharing takes access away from people who may already hold the link,
+  // and nothing is deleted by it, so both of these say exactly what is lost.
+  "confirm.removeLinkTitle": "Odstrániť odkaz?",
+  "confirm.removeLinkMessage":
+    "Odkaz prestane fungovať všetkým, ktorí ho majú. Ľudia pozvaní e-mailom si prístup ponechajú.",
+  "confirm.removeLinkConfirm": "Odstrániť odkaz",
+  "confirm.replaceLinkTitle": "Nahradiť odkaz?",
+  "confirm.replaceLinkMessage":
+    "Tento odkaz je príliš starý na to, aby sa dal zmeniť, takže uložením sa nahradí novým na inej adrese. Starý odkaz prestane fungovať všetkým, ktorí ho majú, a jeho heslo sa zruší. Nový odkaz sa skopíruje do schránky.",
+  "confirm.replaceLinkConfirm": "Nahradiť odkaz",
+  "confirm.stopSharingTitle": "Ukončiť zdieľanie?",
+  "confirm.stopSharingMessage":
+    "Odkaz prestane fungovať a všetci pozvaní stratia prístup. Nič sa nezmaže.",
+  "confirm.stopSharingConfirm": "Ukončiť zdieľanie",
+
+  // Freeing up drops the downloaded copies only. Nothing leaves Proton, so this asks
+  // before a big change without treating it as one there is no way back from.
+  "confirm.freeUpAllTitle": "Uvoľniť všetky stiahnuté fotky?",
+  "confirm.freeUpAllMessage":
+    "{size} v priečinku Proton Photos sa odstráni. Vaše fotky zostávajú v Protone a znova sa stiahnu, keď ich otvoríte.",
+  "confirm.freeUpAllConfirm": "Uvoľniť",
+
+  // Removing every offline copy. The photos themselves are untouched, so this warns
+  // about the download they will need next time and nothing more.
+  "confirm.removeOfflineAllTitle": "Odstrániť všetky offline kópie?",
+  "confirm.removeOfflineAllMessage":
+    "{size} uložených zašifrovane v aplikácii sa odstráni. Vaše fotky zostávajú v Protone a na ich opätovné otvorenie bude potrebné pripojenie.",
+  "confirm.removeOfflineAllConfirm": "Odstrániť",
 };

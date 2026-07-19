@@ -33,6 +33,8 @@ import "@protontech/crypto/polyfill";
 import { VERSION } from "@protontech/drive-sdk";
 import { session } from "./proton/session.ts";
 import { initStore } from "./proton/store.ts";
+import { setVaultMetaKey } from "./proton/vault.ts";
+import { respond, type RpcWriter } from "./rpc.ts";
 import { scrubSecrets } from "./scrub.ts";
 import { checkUpdate, downloadUpdate } from "./update.ts";
 
@@ -81,11 +83,14 @@ process.on("uncaughtException", (err) => {
 type Request = { id: number; method: string; params?: any };
 
 const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
-  // Sent by the Rust host before anything else: the app directory. The store's
-  // data key is not passed here; it is derived from the user's password by the
-  // vault on unlock, so the cache and session stay sealed until then.
+  // Sent by the Rust host before anything else: the app directory, and the key
+  // that seals the vault's own metadata. The store's data key is NOT passed here;
+  // it is derived from the user's password by the vault on unlock, so the cache
+  // and session stay sealed until then. The key below opens neither, and exists
+  // only so the salt behind that derivation is not readable on disk.
   __init: (p) => {
     initStore(p.dataDir);
+    setVaultMetaKey(p.vaultKey);
     return { store: "ready" };
   },
   ping: () => ({ sdkVersion: VERSION, node: process.version }),
@@ -98,8 +103,16 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getTimeline: () => session.getTimeline(),
   getThumbnails: (p) => session.getThumbnails(p.uids),
   getPreview: (p) => session.getPreview(p.uid),
+  getOriginal: (p) => session.getOriginal(p.uid),
+  releaseOriginal: (p) => session.releaseOriginal(p?.uid),
+  readOriginalBytes: (p) => session.readOriginalBytes(p.token),
+  pinOffline: (p) => session.pinOffline(p.uids ?? []),
+  unpinOffline: (p) => session.unpinOffline(p.uids ?? []),
+  unpinAllOffline: () => session.unpinAllOffline(),
+  offlineStatus: () => session.offlineStatus(),
   getVideo: (p) => session.getVideo(p.uid),
-  downloadOriginals: (p) => session.downloadOriginals(p.uids, p.destDir),
+  startSaveOriginals: (p) => session.startSaveOriginals(p.uids, p.destDir),
+  saveStatus: () => session.saveStatus(),
   listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
   hydrateFile: (p) => session.hydrateFile(p.uid),
   heapStats: () => process.memoryUsage(),
@@ -107,22 +120,41 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getAlbumPhotos: (p) => session.getAlbumPhotos(p.uid),
   getAlbumPhotoUids: () => session.getAlbumPhotoUids(),
   listAlbumsForMount: () => session.listAlbumsForMount(),
+  createAlbum: (p) => session.createAlbum(p.name),
+  renameAlbum: (p) => session.renameAlbum(p.uid, p.name),
+  setAlbumCover: (p) => session.setAlbumCover(p.uid, p.coverUid),
+  deleteAlbum: (p) => session.deleteAlbum(p.uid, { force: !!p.force, saveToTimeline: !!p.saveToTimeline }),
+  addPhotosToAlbum: (p) => session.addPhotosToAlbum(p.albumUid, p.uids),
+  removePhotosFromAlbum: (p) => session.removePhotosFromAlbum(p.albumUid, p.uids),
   getShared: (p) => session.getShared(!!p.withMe),
+  getSharingInfo: (p) => session.getSharingInfo(p.uid),
+  // An absent password or expiry keeps whatever the link has; null takes it off.
+  setPublicLink: (p) =>
+    session.setPublicLink(p.uid, { customPassword: p.customPassword, expiration: p.expiration }),
+  removePublicLink: (p) => session.removePublicLink(p.uid),
+  invitePeople: (p) => session.invitePeople(p.uid, p.emails ?? [], String(p.role ?? "viewer")),
+  removePerson: (p) => session.removePerson(p.uid, p.email),
+  stopSharing: (p) => session.stopSharing(p.uid),
   getMetadata: (p) => session.getMetadata(p.uids),
-  startUpload: (p) => session.startUpload(p.paths),
+  getDurations: (p) => session.getDurations(p.uids),
+  getMediaTypes: (p) => session.getMediaTypes(p.uids),
+  startUpload: (p) => session.startUpload(p.paths, p.frames ?? {}, p.media ?? {}),
   uploadStatus: () => session.uploadStatus(),
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),
   getNodeDetails: (p) => session.getNodeDetails(p.uid),
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
-  resume: (p) => session.resume(p),
+  listTrashed: () => session.listTrashed(),
+  restorePhotos: (p) => session.restorePhotos(p.uids),
+  deletePhotosForever: (p) => session.deletePhotosForever(p.uids),
+  emptyTrash: () => session.emptyTrash(),
+  setFavorite: (p) => session.setFavorite(p.uids, !!p.favorite),
   whoami: () => session.whoami(),
   getAccountInfo: () => session.getAccountInfo(),
   signOut: () => session.signOut(),
-  getPersistable: () => session.getPersistable(),
   checkUpdate: () => checkUpdate(),
-  downloadUpdate: (p) => downloadUpdate(p.url, p.sha256),
+  downloadUpdate: () => downloadUpdate(),
 };
 
 async function handle(req: Request): Promise<unknown> {
@@ -138,9 +170,9 @@ async function handle(req: Request): Promise<unknown> {
   }
 }
 
-function send(obj: unknown): void {
-  process.stdout.write(JSON.stringify(obj) + "\n");
-}
+const write: RpcWriter = (line) => {
+  process.stdout.write(line);
+};
 
 process.stderr.write("[sidecar] ready\n");
 let buf = "";
@@ -156,10 +188,15 @@ process.stdin.on("data", (chunk) => {
     try {
       req = JSON.parse(line) as Request;
     } catch {
-      send({ id: null, ok: false, error: "invalid JSON request" });
+      respond(write, null, { id: null, ok: false, error: "invalid JSON request" });
       continue;
     }
-    void handle(req).then(send);
+    const id = req?.id ?? null;
+    void handle(req)
+      .then((res) => respond(write, id, res))
+      .catch((e) =>
+        respond(write, id, { id, ok: false, error: (e as Error).message ?? String(e) }),
+      );
   }
 });
 process.stdin.on("end", () => process.exit(0));

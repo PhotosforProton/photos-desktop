@@ -34,6 +34,7 @@ export const hu: Record<string, string> = {
   "nav.photos": "Fotók",
   "nav.albums": "Albumok",
   "nav.shared": "Megosztott",
+  "nav.trash": "Kuka",
 
   // App shell
   "app.restoring": "Munkamenet visszaállítása…",
@@ -51,6 +52,10 @@ export const hu: Record<string, string> = {
   "tray.syncNow": "Szinkronizálás most",
   "tray.syncing": "Szinkronizálás…",
   "tray.synced": "Naprakész",
+  "tray.locked": "Zárolva",
+  "tray.lockedHint": "Nyisd meg a feloldáshoz",
+  "tray.signedOut": "Nincs bejelentkezve",
+  "tray.signedOutHint": "Nyisd meg a belépéshez",
 
   // Login
   "login.subtitle": "Jelentkezz be a Proton-fiókodba",
@@ -79,6 +84,9 @@ export const hu: Record<string, string> = {
 
   // Settings
   "settings.title": "Beállítások",
+  "settings.general": "Általános",
+  "settings.launchAtLogin": "Indítás a Windowsszal",
+  "settings.launchAtLoginDesc": "A Windowsba való bejelentkezéskor a háttérben indul, és csak a tálcaikon látszik, amíg meg nem nyitod.",
   "settings.appearance": "Megjelenés",
   "settings.theme": "Téma",
   "settings.themeDesc": "A rendszer a Windowst követi, és a változásait is.",
@@ -110,11 +118,50 @@ export const hu: Record<string, string> = {
     "Megjeleníti a Proton Photos bejegyzést az Intéző oldalsávjában a felhős fotókkal. Újraindítás után lép életbe.",
   "settings.autoDownload": "Új fotók automatikus letöltése",
   "settings.autoDownloadDesc":
-    "Ahogy új fotók kerülnek a könyvtáradba, automatikusan megőrződik egy másolatuk ezen az eszközön.",
+    "Ahogy új fotók kerülnek a könyvtáradba, automatikusan letöltődnek a Proton Photos mappába.",
+  "settings.autoDownloadNeedsExplorer":
+    "Csak akkor működik, ha a „Proton Photos” megjelenik a Fájlkezelőben, ez viszont ki van kapcsolva. A letöltés így is elérhető: megkérdezi, hova mentse a fotókat.",
   "settings.restartNeeded": "Újraindítás szükséges a módosításhoz.",
   "settings.restartNow": "Újraindítás most",
+  // File types. The "Open with" entries are the app's own to add and take back out;
+  // the default handler is not, so that half leads out to Windows rather than
+  // pretending to a choice Windows takes from the user alone.
+  "settings.fileTypes": "Fájltípusok",
+  "settings.openWith": "Felvétel a „Megnyitás ezzel” listára",
+  "settings.openWithDesc":
+    "A Photos for Proton megjelenik a Windows „Megnyitás ezzel” menüjében a JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF és HEIC fotóknál, valamint az MP4, MOV, M4V és WebM videóknál. Kikapcsolva a bejegyzések lekerülnek.",
+  "settings.fileTypesFailed": "A fájltípusok módosítása nem sikerült. Próbáld újra.",
+  "settings.defaultApp": "Fotók és videók alapértelmezett alkalmazása",
+  "settings.defaultAppDesc":
+    "Ettől semmi nem lesz alapértelmezett: ezt a választást a Windows csak tőled fogadja el, programtól soha. A Windows beállításaiban, az Alapértelmezett alkalmazások alatt válaszd ki a Photos for Proton alkalmazást.",
+  "settings.defaultAppOpen": "Windows beállítások megnyitása",
+  "settings.defaultAppFailed": "A Windows beállítások megnyitása nem sikerült. Próbáld újra.",
   "settings.lockOnHideDesc":
     "Amikor az ablak a tálcára kerül, az alkalmazás zárolttá válik, és legközelebb a jelszavaddal nyithatod meg.",
+  "settings.storage": "Tárhely",
+  // Two different places a photo can be kept on this machine: encrypted inside the
+  // app, or downloaded into the Proton Photos folder where Windows can read it. The
+  // panel names both rather than adding one number to the other.
+  "settings.downloadedCount.one": "{count} fotó letöltve",
+  "settings.downloadedCount.other": "{count} fotó letöltve",
+  "settings.downloadedNone": "Nincs letöltött fotó",
+  "settings.downloadedDesc":
+    "A letöltött fotók közönséges fájlok a Proton Photos mappában, így a Windows kereső és más programok is olvashatják őket. A felszabadítás csak ezeket a helyi másolatokat törli, a fotóid a Protonon maradnak.",
+  "settings.freeUpAll": "{size} felszabadítása",
+  "settings.freeUpNothing": "Nincs mit felszabadítani",
+  "settings.freeingUp": "Felszabadítás…",
+  "settings.storageOffline": "Offline fotók",
+  "settings.storageExplorer": "A Fájlkezelőben",
+  "settings.offlineCount.one": "{count} fotó van az alkalmazásban",
+  "settings.offlineCount.other": "{count} fotó van az alkalmazásban",
+  "settings.offlineNone": "Nincs fotó az alkalmazásban",
+  "settings.offlineDesc":
+    "Az offline elérhetőnek jelölt fotók titkosítva maradnak az alkalmazáson belül. Internet nélkül is megnyithatók, és soha nem jelennek meg a Proton Photos mappában, így az alkalmazáson kívül semmi nem tudja elolvasni őket.",
+  "settings.offlineSaving": "Mentés {done}/{total}…",
+  "settings.offlineRemoveAll": "{size} felszabadítása",
+  "settings.offlineRemoveNothing": "Nincs mit felszabadítani",
+  "settings.offlineRemoving": "Eltávolítás…",
+  "settings.freeUpFailed": "A hely felszabadítása nem sikerült. Próbáld újra.",
 
   // Profile menu
   "profile.storage": "Tárhely",
@@ -133,8 +180,6 @@ export const hu: Record<string, string> = {
   "photos.search": "Keresés",
   "photos.searchPlaceholder": "Keresés fájlnév vagy típus szerint…",
   "photos.closeSearch": "Keresés bezárása",
-  "photos.smaller": "Kisebb",
-  "photos.bigger": "Nagyobb",
   "photos.indexing": "Indexelés {done}/{total}",
   "photos.uploadTitle": "Fotók feltöltése, vagy egy mappa albumként",
   "photos.uploadingProgress": "Feltöltés {progress}",
@@ -145,7 +190,16 @@ export const hu: Record<string, string> = {
   "photos.loadingThumbnails": "Bélyegképek betöltése…",
   "photos.dropTitle": "Húzd ide a feltöltéshez",
   "photos.dropSub": "A mappából azonos nevű album lesz",
-  "photos.offline": "Elérhető offline",
+  "photos.offline": "Elérhető offline, titkosítva az alkalmazásban",
+  "photos.downloaded": "Letöltve a Proton Photos mappába",
+  "photos.renameTitle": "Fotó átnevezése",
+  "photos.namePlaceholder": "Fájlnév",
+
+  // Tile badges
+  "badge.motionPhoto": "Mozgó fotó",
+  "badge.panorama": "Panoráma",
+  "badge.raw": "RAW",
+  "badge.favorite": "Kedvenc",
 
   // Search type filters
   "filter.images": "Képek",
@@ -175,26 +229,123 @@ export const hu: Record<string, string> = {
   "albums.untitled": "Névtelen album",
   "albums.empty": "Ez az album üres",
   "albums.none": "Még nincsenek albumok",
-  "albums.noneSub": "Húzz egy mappát az ablakra egy létrehozásához.",
-  "albums.keepOffline": "Album megtartása ezen az eszközön",
-  "albums.keptOffline": "Az eszközön tartva (kattints a leállításhoz)",
+  "albums.noneSub": "Hozz létre egyet itt, vagy húzz egy mappát az ablakra.",
+  "albums.keepDownloaded": "Album letöltése a Proton Photos mappába",
+  "albums.keptDownloaded": "Letöltés a Proton Photos mappába (kattints a leállításhoz)",
+  "albums.freeUpTitle": "Felszabadítod az album tárhelyét?",
+  "albums.freeUpCount.one":
+    "Az album már nem tölti le magát. Az eddig letöltött {count} fotó maradhat a Proton Photos mappában, vagy felszabadíthatod a helyét. Mindkét esetben a Protonon marad.",
+  "albums.freeUpCount.other":
+    "Az album már nem tölti le magát. Az eddig letöltött {count} fotó maradhat a Proton Photos mappában, vagy felszabadíthatod a helyüket. Mindkét esetben a Protonon maradnak.",
+  "albums.freeUpKeep": "Maradjon letöltve",
+  "albums.freeUpConfirm": "Felszabadítás",
+  "albums.newAlbum": "Új album",
+  "albums.newTitle": "Nevezd el az albumot",
+  "albums.namePlaceholder": "Album neve",
+  "albums.create": "Létrehozás",
+  "albums.createAndAdd": "Létrehozás és hozzáadás",
+  "albums.rename": "Átnevezés",
+  "albums.renameTitle": "Album átnevezése",
+  "albums.share": "Album megosztása",
+  "albums.delete": "Album törlése",
+  "albums.deleted": "Album törölve",
+  "albums.addTitle": "Hozzáadás albumhoz",
+  "albums.addCount.one": "Válaszd ki, hová kerüljön {count} fotó.",
+  "albums.addCount.other": "Válaszd ki, hová kerüljön {count} fotó.",
+  "albums.added": "{count} hozzáadva",
+  "albums.addPartial": "{ok} hozzáadva, {failed} sikertelen",
+  "albums.removed": "{count} eltávolítva az albumból",
+  "albums.removePartial": "{ok} eltávolítva, {failed} sikertelen",
+  "albums.coverSet": "Borító frissítve",
+  "albums.strandedTitle.one": "{count} fotó csak ebben az albumban van meg",
+  "albums.strandedTitle.other": "{count} fotó csak ebben az albumban van meg",
+  "albums.strandedMsg.one":
+    "Nincs rajta az idővonaladon, így az album törlésével együtt törlődik. Mentsd az idővonaladra, ha meg akarod tartani.",
+  "albums.strandedMsg.other":
+    "Nincsenek rajta az idővonaladon, így az album törlésével együtt törlődnek. Mentsd őket az idővonaladra, ha meg akarod tartani őket.",
+  "albums.savePhotos": "Mentés az idővonalra",
+  "albums.deletePhotosToo": "Fotók törlése is",
 
   // Shared
   "shared.byMe": "Általam megosztott",
   "shared.withMe": "Velem megosztott",
+  "shared.flip": "Váltás az általam és a velem megosztottak között",
   "shared.emptyByTitle": "Nem osztasz meg semmit",
   "shared.emptyWithTitle": "Nincs veled megosztva semmi",
   "shared.emptyBySub": "Az általad megosztott fotók és albumok itt jelennek meg.",
   "shared.emptyWithSub": "A veled megosztott fotók és albumok itt jelennek meg.",
   "shared.publicLink": "Megosztva nyilvános linkkel",
   "shared.album": "Album",
+  "shared.manage": "Megosztás kezelése",
+  "shared.back": "Vissza a megosztásokhoz",
+
+  // Share dialog. A public link's URL carries the secret that decrypts what it
+  // points at, so copying it whole is the whole point of the link section. A
+  // link's password is never read back, so the dialog reports whether one is set
+  // rather than showing it.
+  "share.title": "Megosztás",
+  "share.linkTitle": "Nyilvános link",
+  "share.linkDesc": "A linkkel bárki megnyithatja ezt a fotót.",
+  "share.createLink": "Link létrehozása",
+  "share.copyLink": "Link másolása",
+  "share.copied": "Másolva",
+  "share.removeLink": "Link eltávolítása",
+  "share.passwordLabel": "Jelszó",
+  "share.passwordSet": "Megnyitáshoz szükséges",
+  "share.passwordNone": "Nincs beállítva",
+  "share.passwordPlaceholder": "Új jelszó",
+  "share.expiryLabel": "Lejárat",
+  "share.expiryNever": "Soha",
+  "share.expiryPast": "Válassz jövőbeli dátumot.",
+  "share.add": "Hozzáadás",
+  "share.change": "Módosítás",
+  "share.set": "Beállítás",
+  "share.save": "Mentés",
+  "share.albumInviteOnly": "Az albumok meghívóval oszthatók meg, nem nyilvános linkkel.",
+  "share.peopleTitle": "Emberek",
+  "share.emailPlaceholder": "E-mail-cím",
+  "share.invite": "Meghívás",
+  "share.roleViewer": "Megtekintő",
+  "share.roleEditor": "Szerkesztő",
+  "share.stateInvited": "Meghívva",
+  "share.stateExternal": "Meghívva (nincs Proton-fiók)",
+  "share.remove": "Eltávolítás",
+  "share.noPeople": "Még senki",
+  "share.stopSharing": "Megosztás leállítása",
+  "share.notOwned":
+    "Ezt veled osztották meg. Csak a tulajdonosa módosíthatja, hogy ki férhet hozzá.",
+  "share.badEmail": "Ez nem tűnik e-mail-címnek.",
+  "share.copyFailed": "A link másolása nem sikerült",
+  "share.failed": "A megosztás módosítása nem sikerült",
+  "share.working": "Folyamatban…",
+
+  // Trash
+  "trash.emptyTitle": "A kuka üres",
+  "trash.emptySub": "Ide kerülnek a kukába helyezett fotók, és innen vissza is állíthatók.",
+  "trash.emptyAction": "Kuka ürítése",
+  "trash.moved": "{count} áthelyezve a kukába",
+  "trash.movedPartial": "{ok} áthelyezve a kukába, {failed} sikertelen",
+  "trash.restored": "{count} visszaállítva",
+  "trash.deleted": "{count} véglegesen törölve",
+  "trash.emptied": "A kuka kiürítve",
+  "trash.partial": "{ok} kész, {failed} sikertelen",
 
   // Photo viewer / lightbox
   "viewer.details": "Részletek",
-  "viewer.download": "Letöltés eszközre",
-  "viewer.freeUp": "Hely felszabadítása",
+  "viewer.offlineAdd": "Offline másolat megtartása, titkosítva az alkalmazásban",
+  "viewer.offlineRemove": "Offline másolat eltávolítása",
+  "viewer.download": "Letöltés a Proton Photos mappába",
+  "viewer.saveToFolder": "Másolat mentése tetszőleges helyre",
+  "viewer.freeUp": "A helyi másolat eltávolítása helyfelszabadításhoz",
   "viewer.detailsShortcut": "Részletek (I)",
+  "viewer.contents": "Tartalom",
+  "viewer.contentsShortcut": "Tartalom (L)",
+  "viewer.filmstrip": "Szomszédos elemek",
+  "viewer.position": "{n} / {total}",
+  "viewer.favoriteShortcut": "Hozzáadás a kedvencekhez (F)",
+  "viewer.unfavoriteShortcut": "Eltávolítás a kedvencekből (F)",
   "viewer.trashShortcut": "Áthelyezés a kukába (Del)",
+  "viewer.shareShortcut": "Megosztás (S)",
   "viewer.rename": "Kattints az átnevezéshez",
   "viewer.closeShortcut": "Bezárás (Esc)",
   "viewer.prev": "Előző (←)",
@@ -206,20 +357,61 @@ export const hu: Record<string, string> = {
   "viewer.added": "Hozzáadva",
   "viewer.modified": "Módosítva",
   "viewer.size": "Méret",
-  "viewer.onServer": "Szerveren",
+  "viewer.onServer": "Felhasznált tárhely",
   "viewer.albums": "Albumok",
   "viewer.shared": "Megosztva",
   "viewer.sharedPublic": "Nyilvános link",
   "viewer.sharedPeople": "Személyekkel",
   "viewer.sharedNo": "Nem",
   "viewer.unverified": " (nem ellenőrzött)",
-  "viewer.trashFailed": "nem sikerült a kukába helyezni",
+  "viewer.trashFailed": "Ezt a fotót nem sikerült a kukába helyezni.",
+  "viewer.favoriteFailed": "A kedvenceket nem sikerült frissíteni.",
+  "viewer.downloadFailed": "Ezt a fotót nem sikerült letölteni.",
   "viewer.zoomOut": "Kicsinyítés",
   "viewer.zoomIn": "Nagyítás",
   "viewer.resetFit": "Visszaállítás méretre",
   "viewer.videoLoading": "Videó betöltése…",
-  "viewer.videoError": "Ez a videóformátum itt nem játszható le. Töltsd le a megtekintéshez.",
-  "viewer.videoTooLarge": "Ez a videó túl nagy a lejátszáshoz. Töltsd le a megtekintéshez.",
+  "viewer.videoError":
+    "Ez a videóformátum itt nem játszható le. Töltsd le, és nézd meg egy másik lejátszóban.",
+  "viewer.videoTooLarge":
+    "Ez a videó túl nagy ahhoz, hogy itt lejátszható legyen. Töltsd le, és nézd meg egy másik lejátszóban.",
+
+  // The viewer's own video controls, which stand in for the browser's.
+  "viewer.videoPlay": "Lejátszás (szóköz)",
+  "viewer.videoPause": "Szünet (szóköz)",
+  "viewer.videoStepBack": "Előző képkocka",
+  "viewer.videoStepForward": "Következő képkocka",
+  "viewer.videoSeek": "Lejátszási pozíció",
+  "viewer.videoMute": "Némítás",
+  "viewer.videoUnmute": "Némítás feloldása",
+
+  // Local file viewer: a file opened from File Explorer, which the app can show
+  // with nobody signed in. Everything both viewers say alike comes from above.
+  "local.camera": "Fényképezőgép",
+  "local.created": "Létrehozva",
+  "local.path": "Hely",
+  "local.upload": "Feltöltés a Protonra",
+  "local.uploadUnsupported": "A Proton nem fogadja el ezt a fájltípust",
+  "local.uploading": "Feltöltés…",
+  "local.uploaded": "Mentve a Protonra",
+  "local.uploadSkipped": "Már mentve van",
+  "local.uploadFailed": "A feltöltés nem sikerült. Próbáld újra.",
+  "local.delete": "Törlés",
+  "local.deleteTitle": "Törlöd ezt a fájlt?",
+  "local.deleteMessage": "A(z) „{name}” a lomtárba kerül.",
+  "local.notFound": "Ezt a fájlt áthelyezték vagy törölték.",
+  "local.unreadable":
+    "Ezt a fájlt nem lehet olvasni. Lehet, hogy egy másik program nyitva tartja, vagy ez a fiók nem fér hozzá.",
+  "local.openFailed": "Ezt a fájlt nem lehet megnyitni.",
+  "local.decodeFailed": "Ezt a fotót nem lehet beolvasni. Lehet, hogy a fájl sérült vagy hiányos.",
+  "local.videoUnsupported":
+    "Ez a videóformátum itt nem játszható le. Nyisd meg egy másik lejátszóban.",
+  "local.noCodec":
+    "A Windowsnak nincs dekódolója ehhez a formátumhoz, ezért itt nem jeleníthető meg. A Microsoft Store-ban néhányhoz megtalálható a hiányzó rész: a HEIC-fotókhoz a HEIF- és HEVC-bővítmény, a nyers fényképezőgépes fájlokhoz pedig a Raw Image Extension.",
+  "local.signInTitle": "Belépés a feltöltéshez",
+  "local.signInBody":
+    "Megnyílik az alkalmazás ablaka, ahol be tudsz lépni. Ez a fájl itt nyitva marad.",
+  "local.signInAction": "Belépés",
 
   // Upload panel
   "upload.title": "Feltöltés",
@@ -246,23 +438,106 @@ export const hu: Record<string, string> = {
   "selection.count.one": "{count} fotó kijelölve",
   "selection.count.other": "{count} fotó kijelölve",
   "selection.trash": "Kuka",
+  "selection.restore": "Visszaállítás",
+  "selection.deleteForever": "Végleges törlés",
+  "selection.more": "Több",
   "selection.download": "Letöltés",
   "selection.freeUp": "Felszabadítás",
+  "selection.addToAlbum": "Hozzáadás albumhoz",
+  "selection.removeFromAlbum": "Eltávolítás az albumból",
+  "selection.setCover": "Beállítás borítóként",
+  "selection.rename": "Átnevezés",
+  "selection.share": "Megosztás",
+  "selection.favorite": "Hozzáadás a kedvencekhez",
+  "selection.unfavorite": "Eltávolítás a kedvencekből",
+  "selection.offlineAdd": "Elérhető offline",
+  "selection.offlineRemove": "Offline másolat eltávolítása",
+  // Download: the copy that lands in the Proton Photos folder, where Windows and any
+  // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} felszabadítva",
+  "download.freedUpNone": "Semmi sem szabadult fel",
   "download.notDownloaded": "Nincs mit felszabadítani",
   "download.running": "Letöltés…",
-  "download.done": "{count} elérhető offline",
-  "download.alreadyOffline": "Már elérhető offline",
+  "download.progress": "Letöltés {done}/{total}…",
+  "download.done": "{count} letöltve a Proton Photos mappába",
+  "download.donePartial": "{ok} / {total} letöltve",
+  "download.doneNone":
+    "Semmi sem lett letöltve. Lehet, hogy a Proton Photos mappa még nem áll készen.",
+  "download.alreadyDownloaded": "Már letöltve",
+  "download.saved": "{count} elmentve a mappába",
   "download.partial": "{ok} elmentve, {failed} sikertelen",
+
+  // Available offline: the app's own encrypted copy, which is not the Proton Photos
+  // folder. These say where the copy went, so the two are never mistaken for one another.
+  "offline.added.one": "{count} fotó mentése offline használatra",
+  "offline.added.other": "{count} fotó mentése offline használatra",
+  "offline.removed.one": "{count} offline másolat eltávolítva",
+  "offline.removed.other": "{count} offline másolat eltávolítva",
+  "offline.alreadyOffline": "Már elérhető offline",
+  "offline.noneOffline": "Nincs eltávolítható offline másolat",
+  "offline.failed": "nem sikerült offline használatra menteni",
 
   // Trash confirmation
   "confirm.trashTitle": "Áthelyezés a kukába?",
   "confirm.trashConfirm": "Áthelyezés a kukába",
   "confirm.trashCount.one":
-    "{count} fotó a kukába kerül. A Proton Drive-ból visszaállíthatók.",
+    "{count} fotó a kukába kerül. A Kuka fülön visszaállítható.",
   "confirm.trashCount.other":
-    "{count} fotó a kukába kerül. A Proton Drive-ból visszaállíthatók.",
+    "{count} fotó a kukába kerül. A Kuka fülön visszaállíthatók.",
   "confirm.trashName":
-    'A(z) "{name}" a kukába kerül. A Proton Drive-ból visszaállítható.',
+    'A(z) "{name}" a kukába kerül. A Kuka fülön visszaállítható.',
   "confirm.thisPhoto": "Ez a fotó",
+
+  // Remove from album. The photos stay in Photos; only the album loses them.
+  "confirm.removeTitle": "Eltávolítod az albumból?",
+  "confirm.removeConfirm": "Eltávolítás",
+  "confirm.removeCount.one": "{count} fotó kikerül ebből az albumból, de az idővonaladon marad.",
+  "confirm.removeCount.other": "{count} fotó kikerül ebből az albumból, de az idővonaladon marad.",
+
+  // Delete-forever confirmation. Nothing in the app or at Proton undoes these.
+  "confirm.deleteTitle": "Végleges törlés?",
+  "confirm.deleteConfirm": "Végleges törlés",
+  "confirm.deleteCount.one":
+    "{count} fotó véglegesen törlődik a Protonról. Ez nem vonható vissza.",
+  "confirm.deleteCount.other":
+    "{count} fotó véglegesen törlődik a Protonról. Ez nem vonható vissza.",
+  "confirm.emptyTitle": "Kiüríted a kukát?",
+  "confirm.emptyConfirm": "Minden törlése",
+  "confirm.emptyMessage":
+    "A kuka teljes tartalma véglegesen törlődik a Protonról. Ez nem vonható vissza.",
+
+  // Deleting an album skips the trash, so the album is gone for good even though
+  // the photos in your timeline are not.
+  "confirm.deleteAlbumTitle": "Törlöd ezt az albumot?",
+  "confirm.deleteAlbumMessage":
+    "Az album törlődik, és nem állítható vissza. Az idővonaladon lévő fotók megmaradnak.",
+
+  // Revoking sharing takes access away from people who may already hold the link,
+  // and nothing is deleted by it, so both of these say exactly what is lost.
+  "confirm.removeLinkTitle": "Eltávolítod a linket?",
+  "confirm.removeLinkMessage":
+    "A link mindenkinél megszűnik működni, akinél megvan. Az e-mailben meghívottak hozzáférése megmarad.",
+  "confirm.removeLinkConfirm": "Link eltávolítása",
+  "confirm.replaceLinkTitle": "Lecseréled a linket?",
+  "confirm.replaceLinkMessage":
+    "Ez a link túl régi ahhoz, hogy módosítható legyen, ezért a mentés egy új, másik címen lévő linkre cseréli. A régi link mindenkinél megszűnik működni, akinél megvan, és a jelszava is törlődik. Az új link a vágólapra kerül.",
+  "confirm.replaceLinkConfirm": "Link lecserélése",
+  "confirm.stopSharingTitle": "Leállítod a megosztást?",
+  "confirm.stopSharingMessage":
+    "A link megszűnik működni, és minden meghívott elveszíti a hozzáférését. Semmi nem törlődik.",
+  "confirm.stopSharingConfirm": "Megosztás leállítása",
+
+  // Freeing up drops the downloaded copies only. Nothing leaves Proton, so this asks
+  // before a big change without treating it as one there is no way back from.
+  "confirm.freeUpAllTitle": "Felszabadítod az összes letöltött fotót?",
+  "confirm.freeUpAllMessage":
+    "A Proton Photos mappában lévő {size} törlődik. A fotóid a Protonon maradnak, és amikor megnyitod őket, újra letöltődnek.",
+  "confirm.freeUpAllConfirm": "Felszabadítás",
+
+  // Removing every offline copy. The photos themselves are untouched, so this warns
+  // about the download they will need next time and nothing more.
+  "confirm.removeOfflineAllTitle": "Eltávolítod az összes offline másolatot?",
+  "confirm.removeOfflineAllMessage":
+    "Az alkalmazásban titkosítva tárolt {size} törlődik. A fotóid a Protonon maradnak, de a megnyitásukhoz újra internet kell.",
+  "confirm.removeOfflineAllConfirm": "Eltávolítás",
 };

@@ -23,10 +23,25 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
+import { downloadPhotos, explorerMode } from "../lib/download";
+import { pinOffline, unpinOffline } from "../lib/offline";
 import { cachedPreview, dropPreview, loadPreview } from "../lib/previewStore";
+import { fetchOriginal, releaseOriginal } from "../lib/originalStore";
+import { useCloudMedia, type CloudItem } from "../hooks/useCloudMedia";
+import { useProgressiveImage } from "../hooks/useProgressiveImage";
+import { formatBytes, formatDate, dimensionsOf } from "../lib/format";
 import { Confirm } from "./Confirm";
-import { PhotoViewer } from "./PhotoViewer";
-import { CloseIcon, InfoIcon, TrashIcon } from "./icons";
+import { ShareDialog } from "./ShareDialog";
+import { ViewerShell, type ViewerStage } from "./ViewerShell";
+import {
+  CloudIcon,
+  DownloadIcon,
+  HeartIcon,
+  OfflinePinIcon,
+  ShareIcon,
+  TrashIcon,
+} from "./icons";
+import { TAG, withFavorite } from "../lib/tags";
 import { useT } from "../lib/i18n";
 import "../styles/Lightbox.css";
 
@@ -60,41 +75,52 @@ type Props = {
   onClose: () => void;
   onTrashed: (uid: string) => void;
   onRenamed: (uid: string, name: string) => void;
-  /** Whether this photo is kept offline (hydrated) — drives Download vs Free up. */
+  /** Whether this photo is downloaded (hydrated), which drives Download vs Free up. */
   isLocal?: boolean;
+  /** Whether the app holds its own encrypted copy, a different place from `isLocal`. */
+  isOffline?: boolean;
+  /**
+   * What the caller already knows this node to be, from the timeline tags. When
+   * given, the viewer branches image/video and starts the preview (or the video)
+   * immediately, without waiting for the details lookup. Callers with a plain photo
+   * list omit it, and the details settle the media type instead, as before.
+   */
+  kind?: "image" | "video";
+  /**
+   * The caller's cached favourite state, so the heart is right on the first frame.
+   * Callers without cached tags omit it and the details lookup settles it instead.
+   */
+  isFavorite?: boolean;
+  onFavoriteChanged?: (uid: string, isFavorite: boolean) => void;
+  /**
+   * The list this photo sits in, for the filmstrip and the contents list. The caller
+   * already holds it, so it is passed rather than fetched; without it the viewer is
+   * exactly what it was, one photo and two arrows.
+   *
+   * `index` is where `uid` sits in it, and `onJump` is handed the index to move to.
+   */
+  items?: CloudItem[];
+  index?: number;
+  onJump?: (i: number) => void;
 };
 
-function formatBytes(n: number | null): string {
-  if (n === null || n === undefined) return "—";
-  const units = ["B", "KB", "MB", "GB"];
-  let value = n;
-  let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i++;
-  }
-  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatDate(ms: number | null): string {
-  if (!ms) return "—";
-  return new Date(ms).toLocaleString(navigator.language || "en");
-}
-
-/** Width/height live in encrypted extended attributes, whose casing varies. */
-function dimensionsOf(extra: Record<string, unknown> | null): string | null {
-  if (!extra) return null;
-  const pick = (...keys: string[]) => {
-    for (const k of keys) {
-      const v = extra[k];
-      if (typeof v === "number" && v > 0) return v;
-    }
-    return null;
-  };
-  const w = pick("Width", "width");
-  const h = pick("Height", "height");
-  return w && h ? `${w} × ${h}` : null;
-}
+/**
+ * How long a photo has to be the one on screen before the calls that are not its
+ * picture go out for it.
+ *
+ * Those calls are the full-resolution upgrade, the details behind the name and the info
+ * panel, and a video's own bytes. Each is worth having for a photo somebody is looking
+ * at and worth nothing at all for one passed through on the way to another. The
+ * sidecar answers one call at a time, so a run through fifty photos used to put three
+ * rounds of them in front of the one photo the reader stopped on. Waiting for the photo
+ * to settle means a photo passed through never asks for any of them.
+ *
+ * Long enough to cover a held arrow key, short enough that stopping does not read as a
+ * pause: the picture is already up by then either way, because the preview is
+ * deliberately NOT behind this and goes out the instant the photo opens, exactly as it
+ * always has.
+ */
+const SETTLE_MS = 250;
 
 /** Decode base64 video bytes (from the sidecar) into a playable Blob. */
 function b64ToBlob(b64: string, mime: string): Blob {
@@ -104,6 +130,11 @@ function b64ToBlob(b64: string, mime: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
+/**
+ * The viewer for a photo in Proton. The stage, the navigation, the keyboard and
+ * the panel around the rows are the shared shell; what is left here is the
+ * actions that need an account and the SDK lookup that fills the rows.
+ */
 export function Lightbox({
   uid,
   fallbackUrl,
@@ -115,103 +146,169 @@ export function Lightbox({
   onTrashed,
   onRenamed,
   isLocal = false,
+  isOffline = false,
+  kind,
+  isFavorite,
+  onFavoriteChanged,
+  items,
+  index = -1,
+  onJump,
 }: Props) {
   const t = useT();
-  const [preview, setPreview] = useState<string | null>(null);
+  const neighbours = useCloudMedia(items, index, onJump);
+  // Both carry the photo they belong to. A uid change re-renders before the effect
+  // below can clear them, so an untagged value would spend that render paired with the
+  // new photo — showing the one just stepped away from under the new photo's name.
+  const [preview, setPreview] = useState<{ uid: string; url: string | null } | null>(null);
+  const [original, setOriginal] = useState<{ uid: string; url: string | null } | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoState, setVideoState] = useState<"idle" | "loading" | "ready" | "toolarge" | "error">(
     "idle",
   );
   const [details, setDetails] = useState<Details | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [draftName, setDraftName] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [error, setError] = useState("");
+  // Our own optimistic flip, which outranks both sources below until the uid
+  // changes. Cleared on failure, so the heart falls back to the truth.
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
 
-  const isVideo = (details?.mediaType ?? "").startsWith("video/");
+  // The caller's kind wins when it has one, so the video branch fires on open
+  // without waiting for the details. Without it, the media type comes from the
+  // details as before (the fallback path fetches them on open).
+  const isVideo =
+    kind === "video" || (kind === undefined && (details?.mediaType ?? "").startsWith("video/"));
+
+  // The caller's cached tags win when it has them (instant, and it is the state
+  // the grid renders); callers without them fall back to the details lookup.
+  // `null` means not known yet, which keeps the heart disabled rather than lying.
+  const fav: boolean | null =
+    favOverride ?? isFavorite ?? (details ? details.tags.includes(TAG.Favorite) : null);
 
   useEffect(() => {
     setError("");
-    setRenaming(false);
     setConfirming(false);
+    setSharing(false);
     setDetails(null);
+    setFavOverride(null);
     setVideoUrl(null);
     setVideoState("idle");
 
     let cancelled = false;
+    // Resolves true once this photo has been the one on screen for long enough to be
+    // worth more than its picture, and false the moment the viewer leaves it. Both
+    // outcomes settle, so nothing below is left suspended on a photo nobody is on.
+    let onSettle: (stayed: boolean) => void = () => {};
+    const settled = new Promise<boolean>((resolve) => {
+      onSettle = resolve;
+    });
+    const settleTimer = setTimeout(() => onSettle(true), SETTLE_MS);
+
     // A prefetched neighbour is already here, so stepping across is instant.
     const cached = cachedPreview(uid) ?? null;
-    setPreview(cached);
+    setPreview({ uid, url: cached });
+    setOriginal(null);
     setLoadingPreview(cached === null);
 
+    // The HD still is what the user is waiting for, so it goes out on its own and
+    // never queues behind the details lookup on the single channel. (A video shows
+    // this as its poster while its bytes load in the effect below.)
     (async () => {
       try {
-        const [meta, hd] = await Promise.all([
-          rpc<Details>("getNodeDetails", { uid }),
-          loadPreview(uid),
-        ]);
-        if (cancelled) return;
-        setPreview(hd);
-        setDetails(meta);
-      } catch (e) {
-        if (!cancelled) setError(String(e));
+        const hd = await loadPreview(uid);
+        if (!cancelled) setPreview({ uid, url: hd });
       } finally {
         // Whether the HD arrived or not, the load attempt is over — stop the
         // spinner. A failed preview simply falls back to the grid thumbnail
         // instead of spinning forever.
         if (!cancelled) setLoadingPreview(false);
       }
+
+      // Then, and only then, the photo's own bytes. The preview is a thumbnail, so it
+      // is as sharp as this viewer could ever get before this step; the full file
+      // replaces it in place once it has decoded.
+      //
+      // Deliberately after the preview rather than alongside it: both are served by the
+      // one sidecar, and nothing may make the fast path slower. Behind the settle as
+      // well, because a preview already in the cache resolves instantly and would
+      // otherwise let a photo being stepped past start a transfer of its own. It
+      // resolves to null for a format the engine cannot draw, for a video reaching here
+      // before the details have settled its type, and for a transfer that fails. In
+      // every one of those the preview simply stays, which is what the viewer showed
+      // before.
+      if (!cancelled && kind !== "video" && (await settled)) {
+        const full = await fetchOriginal(uid, () => cancelled);
+        if (!cancelled) setOriginal({ uid, url: full });
+      }
+    })();
+
+    // The details carry the filename shown in the top bar and everything in the
+    // info panel. They go out once the photo has settled, so a photo being passed
+    // through never asks for them and the one the reader stops on is not queued behind
+    // the lookups of everything before it. Re-runs per photo, so stepping keeps the name
+    // in sync. `kind` (when the caller has it) already drives the image/video branch
+    // below, so the preview never waits on these details to start.
+    (async () => {
+      if (!(await settled)) return;
+      try {
+        const meta = await rpc<Details>("getNodeDetails", { uid });
+        if (!cancelled) setDetails(meta);
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
     })();
 
     return () => {
       cancelled = true;
+      clearTimeout(settleTimer);
+      onSettle(false);
+      // The staged original is a decrypted photo sitting on disk, so it goes as soon as
+      // the viewer steps off this one or closes, rather than lingering until the next
+      // photo displaces it. A photo left before it ever asked for one has nothing to
+      // drop, and the release knows it.
+      releaseOriginal(uid);
     };
-  }, [uid]);
+  }, [uid, kind]);
 
   // A video: fetch its bytes (kept in memory) and wrap them in a Blob to play.
   // Images skip this entirely and keep using the HD still above.
+  //
+  // Behind the same settle, and this is where it matters most: a video crosses the one
+  // channel as a whole file in a single call, so one stepped past used to hold the
+  // viewer up for every photo after it. The poster is the preview and it is already
+  // showing, so what the wait actually delays is the first frame becoming playable.
+  //
+  // Only when the caller told us this was a video, which is the case that fires on open.
+  // Reaching here off the details instead means the photo has already sat still long
+  // enough to have asked for them, and charging it a second wait would be paying twice.
   useEffect(() => {
     if (!isVideo) return;
     let url: string | null = null;
     let cancelled = false;
     setVideoState("loading");
-    (async () => {
-      try {
-        const v = await rpc<{ base64: string; mime: string }>("getVideo", { uid });
-        if (cancelled) return;
-        url = URL.createObjectURL(b64ToBlob(v.base64, v.mime));
-        setVideoUrl(url);
-        setVideoState("ready");
-      } catch (e) {
-        if (!cancelled) {
-          setVideoState(String(e).includes("VIDEO_TOO_LARGE") ? "toolarge" : "error");
+    const settle = setTimeout(() => {
+      void (async () => {
+        try {
+          const v = await rpc<{ base64: string; mime: string }>("getVideo", { uid });
+          if (cancelled) return;
+          url = URL.createObjectURL(b64ToBlob(v.base64, v.mime));
+          setVideoUrl(url);
+          setVideoState("ready");
+        } catch (e) {
+          if (!cancelled) {
+            setVideoState(String(e).includes("VIDEO_TOO_LARGE") ? "toolarge" : "error");
+          }
         }
-      }
-    })();
+      })();
+    }, kind === "video" ? SETTLE_MS : 0);
     return () => {
       cancelled = true;
+      clearTimeout(settle);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [uid, isVideo]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (renaming) {
-        if (e.key === "Escape") setRenaming(false);
-        return;
-      }
-      if (e.key === "Escape") onClose();
-      else if (e.key === "ArrowRight" && hasNext) onNext();
-      else if (e.key === "ArrowLeft" && hasPrev) onPrev();
-      else if (e.key === "Delete") setConfirming(true);
-      else if (e.key.toLowerCase() === "i") setShowDetails((s) => !s);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [uid, isVideo, kind]);
 
   async function trash() {
     if (busy) return;
@@ -234,47 +331,160 @@ export function Lightbox({
     setBusy(false);
   }
 
-  async function commitRename() {
-    const name = draftName.trim();
-    if (!name || name === details?.name) {
-      setRenaming(false);
-      return;
+  async function toggleFavorite() {
+    if (busy || fav === null) return;
+    const next = !fav;
+    setBusy(true);
+    setError("");
+    setFavOverride(next); // flip now; the server call only has to confirm it
+    try {
+      const results = await rpc<{ uid: string; ok: boolean; error?: string }[]>("setFavorite", {
+        uids: [uid],
+        favorite: next,
+      });
+      const failure = results.find((r) => !r.ok);
+      if (failure) {
+        setFavOverride(null);
+        setError(failure.error ?? t("viewer.favoriteFailed"));
+      } else {
+        onFavoriteChanged?.(uid, next);
+        setDetails((d) => (d ? { ...d, tags: withFavorite(d.tags, next) } : d));
+      }
+    } catch (e) {
+      setFavOverride(null);
+      setError(String(e));
     }
+    setBusy(false);
+  }
+
+  /** Rethrows so the shell keeps the editor open on a name the server refused. */
+  async function rename(name: string) {
     setBusy(true);
     setError("");
     try {
       const res = await rpc<{ uid: string; name: string }>("renamePhoto", { uid, name });
       setDetails((d) => (d ? { ...d, name: res.name } : d));
       onRenamed(uid, res.name);
-      setRenaming(false);
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Which mode Download is in, so the button says where the file will actually land
+  // rather than naming the Proton Photos folder and then writing somewhere else.
+  const [explorer, setExplorer] = useState(false);
+  useEffect(() => {
+    void explorerMode().then(setExplorer);
+  }, []);
+
+  // Download the photo in whichever mode is active: into the Proton Photos folder
+  // (hydrate its placeholder, and the grid's poll refreshes the badge and this
+  // button), or into a folder the user picks. Both wait for the real transfer, so
+  // they hold `busy`, because a second click would otherwise start the photo over.
+  // Only a failure is worth a banner: the badge and the file itself confirm the rest.
+  async function download() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await downloadPhotos([uid]);
+      if (result.mode === "explorer" && result.kept === 0) setError(t("download.doneNone"));
+      if (result.mode === "saved" && result.failed > 0) setError(t("viewer.downloadFailed"));
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  }
+  // Free the photo up (dehydrate every copy back to cloud-only).
+  async function freeUp() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      if ((await invoke<number>("free_up_selected", { uids: [uid] })) === 0) {
+        setError(t("download.freedUpNone"));
+      }
     } catch (e) {
       setError(String(e));
     }
     setBusy(false);
   }
 
-  // Keep the photo offline (hydrate its placeholder) or free it up (dehydrate back
-  // to cloud-only). The grid's poll refreshes the badge and this button afterwards.
-  async function download() {
-    await invoke("pin_selected", { uids: [uid] }).catch(() => {});
-  }
-  async function freeUp() {
-    await invoke("free_up_selected", { uids: [uid] }).catch(() => {});
+  // Keep the app's own encrypted copy, or drop it. Separate from Download above: this
+  // one never touches the Proton Photos folder. The grid's watcher refreshes the badge
+  // and this button, so neither needs its own reply.
+  async function toggleOffline() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (isOffline) await unpinOffline([uid]);
+      else await pinOffline([uid]);
+    } catch {
+      setError(t("offline.failed"));
+    }
+    setBusy(false);
   }
 
-  const title = details?.name ?? "";
   const dims = dimensionsOf(details?.extra ?? null);
 
+  // The photo, at the best quality that has arrived: the grid thumbnail the caller
+  // already had, then the preview, then the full-resolution file. Each step waits until
+  // it can be painted, so the picture only ever gets sharper and never blinks. Anything
+  // still tagged with the previous photo counts as not yet arrived.
+  const stillSrc = useProgressiveImage(uid, [
+    fallbackUrl,
+    preview?.uid === uid ? preview.url : null,
+    original?.uid === uid ? original.url : null,
+  ]);
+
+  const stage: ViewerStage = isVideo
+    ? {
+        kind: "video",
+        url: videoState === "ready" ? videoUrl : null,
+        poster: stillSrc,
+        note:
+          videoState === "toolarge"
+            ? t("viewer.videoTooLarge")
+            : videoState === "error"
+              ? t("viewer.videoError")
+              : t("viewer.videoLoading"),
+      }
+    : { kind: "image", src: stillSrc, loading: loadingPreview };
+
   return (
-    <div className="lbx" onClick={onClose}>
-      <div className="lbx-bar" onClick={(e) => e.stopPropagation()}>
-        <div className="lbx-left">
+    <ViewerShell
+      itemKey={uid}
+      name={details?.name ?? ""}
+      stage={stage}
+      error={error}
+      busy={busy}
+      hasPrev={hasPrev}
+      hasNext={hasNext}
+      onPrev={onPrev}
+      onNext={onNext}
+      list={neighbours.list}
+      onRange={neighbours.onRange}
+      onClose={onClose}
+      onRename={rename}
+      onVideoError={() => setVideoState("error")}
+      onKey={(e) => {
+        if (e.key === "Delete") setConfirming(true);
+        else if (e.key.toLowerCase() === "f") void toggleFavorite();
+        else if (e.key.toLowerCase() === "s") setSharing(true);
+      }}
+      toolbar={
+        <>
           <button
-            className={`lbx-ibtn ${showDetails ? "sel" : ""}`}
-            onClick={() => setShowDetails((s) => !s)}
-            title={t("viewer.detailsShortcut")}
+            className={`lbx-ibtn ${fav ? "sel" : ""}`}
+            disabled={busy || fav === null}
+            onClick={() => void toggleFavorite()}
+            title={fav ? t("viewer.unfavoriteShortcut") : t("viewer.favoriteShortcut")}
           >
-            <InfoIcon />
+            <HeartIcon filled={!!fav} />
           </button>
           <button
             className="lbx-ibtn danger"
@@ -284,167 +494,97 @@ export function Lightbox({
           >
             <TrashIcon />
           </button>
+          {/* The app's own copy. Lit while it is held, so the one button reads as a
+              state as much as an action, the way the heart does. */}
+          <button
+            className={`lbx-ibtn ${isOffline ? "sel" : ""}`}
+            disabled={busy}
+            onClick={() => void toggleOffline()}
+            title={isOffline ? t("viewer.offlineRemove") : t("viewer.offlineAdd")}
+          >
+            <OfflinePinIcon />
+          </button>
           <button
             className="lbx-ibtn"
+            disabled={busy}
             onClick={() => void (isLocal ? freeUp() : download())}
-            title={isLocal ? t("viewer.freeUp") : t("viewer.download")}
+            title={
+              isLocal
+                ? t("viewer.freeUp")
+                : explorer
+                  ? t("viewer.download")
+                  : t("viewer.saveToFolder")
+            }
           >
-            {isLocal ? "☁" : "⭳"}
+            {isLocal ? <CloudIcon /> : <DownloadIcon />}
           </button>
-        </div>
-
-        {renaming ? (
-          <input
-            autoFocus
-            className="lbx-rename"
-            value={draftName}
-            onChange={(e) => setDraftName(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void commitRename();
-            }}
-            onBlur={() => setRenaming(false)}
-          />
+          <button
+            className={`lbx-ibtn ${details?.isShared ? "sel" : ""}`}
+            onClick={() => setSharing(true)}
+            title={t("viewer.shareShortcut")}
+          >
+            <ShareIcon />
+          </button>
+        </>
+      }
+      details={
+        !details ? (
+          <p className="lbx-dim">{t("common.loading")}</p>
         ) : (
-          <button
-            className="lbx-title"
-            title={t("viewer.rename")}
-            disabled={!details || busy}
-            onClick={() => {
-              setDraftName(details?.name ?? "");
-              setRenaming(true);
-            }}
-          >
-            {title || "…"}
-          </button>
-        )}
-
-        <div className="lbx-right">
-          <button className="lbx-ibtn" onClick={onClose} title={t("viewer.closeShortcut")}>
-            <CloseIcon />
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div className="lbx-error" onClick={(e) => e.stopPropagation()}>
-          {error}
-        </div>
-      )}
-
-      <div className="lbx-stage" onClick={onClose}>
-        {hasPrev && (
-          <button
-            className="lbx-nav prev"
-            onClick={(e) => {
-              e.stopPropagation();
-              onPrev();
-            }}
-            title={t("viewer.prev")}
-          >
-            ‹
-          </button>
-        )}
-
-        {isVideo ? (
-          videoUrl && videoState === "ready" ? (
-            <video
-              className="lbx-video"
-              src={videoUrl}
-              poster={preview ?? fallbackUrl ?? undefined}
-              controls
-              autoPlay
-              onClick={(e) => e.stopPropagation()}
-              onError={() => setVideoState("error")}
-            />
-          ) : (
-            <div className="lbx-video-fallback" onClick={(e) => e.stopPropagation()}>
-              {(preview ?? fallbackUrl) && (
-                <img className="lbx-video-poster" src={(preview ?? fallbackUrl)!} alt="" />
-              )}
-              <div className="lbx-video-note">
-                {videoState === "toolarge"
-                  ? t("viewer.videoTooLarge")
-                  : videoState === "error"
-                    ? t("viewer.videoError")
-                    : t("viewer.videoLoading")}
-              </div>
-            </div>
-          )
-        ) : (
-          <PhotoViewer src={preview ?? fallbackUrl ?? undefined} loading={loadingPreview} />
-        )}
-
-        {hasNext && (
-          <button
-            className="lbx-nav next"
-            onClick={(e) => {
-              e.stopPropagation();
-              onNext();
-            }}
-            title={t("viewer.next")}
-          >
-            ›
-          </button>
-        )}
-      </div>
-
-      {showDetails && (
-        <div className="lbx-details-backdrop" onClick={() => setShowDetails(false)}>
-          <div className="lbx-details-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="lbx-details-head">
-              <h3>{t("viewer.details")}</h3>
-              <button
-                className="lbx-ibtn"
-                onClick={() => setShowDetails(false)}
-                title={t("common.close")}
-              >
-                <CloseIcon size={14} />
-              </button>
-            </div>
-            {!details ? (
-              <p className="lbx-dim">{t("common.loading")}</p>
-            ) : (
-              <dl>
-              <dt>{t("viewer.name")}</dt>
-              <dd>{details.name || "—"}</dd>
-              <dt>{t("viewer.type")}</dt>
-              <dd>{details.mediaType ?? details.type}</dd>
-              {dims && (
-                <>
-                  <dt>{t("viewer.dimensions")}</dt>
-                  <dd>{dims}</dd>
-                </>
-              )}
-              <dt>{t("viewer.taken")}</dt>
-              <dd>{formatDate(details.captureTime)}</dd>
-              <dt>{t("viewer.added")}</dt>
-              <dd>{formatDate(details.creationTime)}</dd>
-              <dt>{t("viewer.modified")}</dt>
-              <dd>{formatDate(details.modificationTime)}</dd>
-              <dt>{t("viewer.size")}</dt>
-              <dd>{formatBytes(details.size)}</dd>
-              <dt>{t("viewer.onServer")}</dt>
-              <dd>{formatBytes(details.storageSize)}</dd>
-              <dt>{t("viewer.albums")}</dt>
-              <dd>{details.albumCount}</dd>
-              <dt>{t("viewer.shared")}</dt>
-              <dd>
-                {details.isSharedPublicly
-                  ? t("viewer.sharedPublic")
-                  : details.isShared
-                    ? t("viewer.sharedPeople")
-                    : t("viewer.sharedNo")}
-              </dd>
-                {details.sha1 && (
-                  <>
-                    <dt>SHA-1</dt>
-                    <dd className="lbx-mono">{details.sha1}</dd>
-                  </>
-                )}
-              </dl>
+          <dl>
+            <dt>{t("viewer.name")}</dt>
+            <dd>{details.name || "—"}</dd>
+            <dt>{t("viewer.type")}</dt>
+            <dd>{details.mediaType ?? details.type}</dd>
+            {dims && (
+              <>
+                <dt>{t("viewer.dimensions")}</dt>
+                <dd>{dims}</dd>
+              </>
             )}
-          </div>
-        </div>
+            <dt>{t("viewer.taken")}</dt>
+            <dd>{formatDate(details.captureTime)}</dd>
+            <dt>{t("viewer.added")}</dt>
+            <dd>{formatDate(details.creationTime)}</dd>
+            <dt>{t("viewer.modified")}</dt>
+            <dd>{formatDate(details.modificationTime)}</dd>
+            <dt>{t("viewer.size")}</dt>
+            <dd>{formatBytes(details.size)}</dd>
+            <dt>{t("viewer.onServer")}</dt>
+            <dd>{formatBytes(details.storageSize)}</dd>
+            <dt>{t("viewer.albums")}</dt>
+            <dd>{details.albumCount}</dd>
+            <dt>{t("viewer.shared")}</dt>
+            <dd>
+              {details.isSharedPublicly
+                ? t("viewer.sharedPublic")
+                : details.isShared
+                  ? t("viewer.sharedPeople")
+                  : t("viewer.sharedNo")}
+            </dd>
+            {details.sha1 && (
+              <>
+                <dt>SHA-1</dt>
+                <dd className="lbx-mono">{details.sha1}</dd>
+              </>
+            )}
+          </dl>
+        )
+      }
+    >
+      {sharing && (
+        <ShareDialog
+          uid={uid}
+          title={details?.name ?? ""}
+          onClose={() => setSharing(false)}
+          // The toolbar's share button lights up once something is shared, and the
+          // details panel says so in words, so both follow the dialog.
+          onChanged={() =>
+            void rpc<Details>("getNodeDetails", { uid })
+              .then(setDetails)
+              .catch(() => {})
+          }
+        />
       )}
 
       {confirming && (
@@ -460,6 +600,6 @@ export function Lightbox({
           }}
         />
       )}
-    </div>
+    </ViewerShell>
   );
 }

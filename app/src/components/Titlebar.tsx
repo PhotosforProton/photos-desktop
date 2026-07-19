@@ -26,31 +26,46 @@ import logo from "../assets/applogo.png";
 
 const appWindow = getCurrentWindow();
 
-export function Titlebar() {
+/**
+ * The window's own controls.
+ *
+ * Separate from the bar around them because the bar is not always there: the
+ * viewer covers it whole, and when the viewer IS the window's content there is
+ * nothing else left to minimise or close the window with. Both places carry the
+ * same three, so a window never has two ways of being closed that behave
+ * differently.
+ */
+export function WindowButtons() {
   const t = useT();
+  return (
+    <div className="titlebar-buttons">
+      <button className="win-btn" title={t("titlebar.minimize")} onClick={() => appWindow.minimize()}>
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <rect x="1" y="4.5" width="8" height="1" fill="currentColor" />
+        </svg>
+      </button>
+      <button className="win-btn" title={t("titlebar.maximize")} onClick={() => appWindow.toggleMaximize()}>
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" />
+        </svg>
+      </button>
+      <button className="win-btn close" title={t("common.close")} onClick={() => appWindow.close()}>
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" strokeWidth="1" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+export function Titlebar() {
   return (
     <div className="titlebar" data-tauri-drag-region>
       <span className="titlebar-title" data-tauri-drag-region>
         <img className="titlebar-logo" src={logo} alt="" draggable={false} />
         Photos for Proton
       </span>
-      <div className="titlebar-buttons">
-        <button className="win-btn" title={t("titlebar.minimize")} onClick={() => appWindow.minimize()}>
-          <svg width="10" height="10" viewBox="0 0 10 10">
-            <rect x="1" y="4.5" width="8" height="1" fill="currentColor" />
-          </svg>
-        </button>
-        <button className="win-btn" title={t("titlebar.maximize")} onClick={() => appWindow.toggleMaximize()}>
-          <svg width="10" height="10" viewBox="0 0 10 10">
-            <rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" />
-          </svg>
-        </button>
-        <button className="win-btn close" title={t("common.close")} onClick={() => appWindow.close()}>
-          <svg width="10" height="10" viewBox="0 0 10 10">
-            <path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" strokeWidth="1" />
-          </svg>
-        </button>
-      </div>
+      <WindowButtons />
     </div>
   );
 }

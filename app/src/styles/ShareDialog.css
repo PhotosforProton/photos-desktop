@@ -1,0 +1,311 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The share dialog sits in the Confirm panel, so only what that has no
+   equivalent for lives here. It is the widest dialog in the app because a link
+   and a list of people do not fit a confirmation's column. */
+
+.sh-panel {
+  width: min(460px, 88vw);
+}
+
+.sh-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sh-title {
+  margin: 0 0 2px;
+}
+
+/* The name of what is being shared: needed for certainty, never wide enough to
+   push the dialog around. */
+.sh-subtitle {
+  margin: 0;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+}
+
+.sh-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.sh-close:hover {
+  background: var(--line-soft);
+  color: var(--fg-primary);
+}
+
+.sh-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.sh-heading {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+
+.sh-note {
+  margin: 0 0 12px;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.sh-dim {
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.sh-linkrow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* The URL is long and its tail is the part that matters, so it scrolls rather
+   than wraps, and a click takes all of it. */
+.sh-url {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  outline: none;
+}
+.sh-url:focus {
+  border-color: var(--accent);
+}
+
+/* What the link asks of whoever opens it. Each setting is one line: its name,
+   what it is set to now, and what may be done about it. The line becomes its
+   own editor in place, so the section keeps its height either way. */
+.sh-settings {
+  margin: 0 0 14px;
+}
+
+.sh-setting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  font-size: 12.5px;
+}
+
+.sh-setting-name {
+  flex: none;
+  width: 76px;
+  color: var(--fg-dim);
+}
+
+.sh-setting-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg-primary);
+}
+
+.sh-secret,
+.sh-date {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+.sh-secret:focus,
+.sh-date:focus {
+  border-color: var(--accent);
+}
+
+/* Changes a setting rather than undoing one, so it stays neutral where the
+   button beside it turns red. */
+.sh-mini {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sh-mini:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.sh-mini:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A quiet action that undoes something, kept away from the buttons that do. */
+.sh-linkbtn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.sh-linkbtn:hover:not(:disabled) {
+  color: var(--status-error);
+}
+.sh-linkbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sh-invite {
+  display: flex;
+  gap: 8px;
+}
+
+.sh-email {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font-size: 13px;
+  outline: none;
+}
+.sh-email:focus {
+  border-color: var(--accent);
+}
+
+.sh-role {
+  flex: none;
+  height: 34px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+}
+
+.sh-add {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  cursor: pointer;
+}
+.sh-add:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sh-nobody {
+  margin: 12px 0 0;
+}
+
+.sh-people {
+  max-height: 168px;
+  margin: 12px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.sh-person {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.sh-person:last-child {
+  border-bottom: 0;
+}
+
+.sh-email-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg-primary);
+}
+
+.sh-state {
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+}
+
+.sh-stop {
+  width: 100%;
+  margin-top: 18px;
+}
+
+.sh-error {
+  margin: 14px 0 0;
+  color: var(--status-error);
+  font-size: 12.5px;
+  line-height: 1.4;
+}

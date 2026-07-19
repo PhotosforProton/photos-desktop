@@ -23,23 +23,75 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "./assets/logo.png";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0-beta.1";
 const APP_NAME = "Photos for Proton";
 
+// Each of these is allow-listed in src-tauri/capabilities/default.json; the opener
+// plugin hands them to the default browser, so the installer window never navigates.
+const LINKS = {
+  author: "https://akoos.eu",
+  website: "https://www.photosforproton.eu",
+  source: "https://github.com/PhotosforProton/photos-desktop",
+  issues: "https://github.com/PhotosforProton/photos-desktop/issues",
+  contact: "mailto:github@akoos.eu",
+};
+
+function Link({ href, children }: { href: string; children: string }) {
+  return (
+    <button className="link" onClick={() => void openUrl(href).catch(() => {})}>
+      {children}
+    </button>
+  );
+}
+
+// Verbatim from the project README ("Not affiliated with Proton"). Trademark wording:
+// keep it in sync with the README rather than rephrasing it here.
+const DISCLAIMER =
+  'This is an independent project, not affiliated with, endorsed by, or supported by Proton AG. "Proton" and "Proton Drive" are trademarks of Proton AG.';
+
+// An installer named "Photos for Proton" should never leave the user guessing where it
+// came from, so who made it sits in plain view instead of behind a disclosure. The
+// address is spelled out rather than hidden behind the word "Contact": a mailto opens
+// nothing on a machine with no mail client set up, and a reader still needs it then.
+function About() {
+  return (
+    <div className="about">
+      <p className="about-what">Unofficial desktop client for Proton Drive Photos.</p>
+      <p className="about-links">
+        Made by <Link href={LINKS.author}>Akoos</Link> &middot; <Link href={LINKS.website}>Website</Link> &middot;{" "}
+        <Link href={LINKS.source}>Source</Link> &middot; <Link href={LINKS.issues}>Issues</Link>
+      </p>
+      <p className="about-links">
+        Contact <Link href={LINKS.contact}>github@akoos.eu</Link>
+      </p>
+    </div>
+  );
+}
+
+// How this exe was launched: as the installer, or as the installed uninstall.exe.
 type Mode = "install" | "uninstall";
-type Step = "welcome" | "options" | "working" | "done" | "error";
+// What the user asked for. Running the installer over an install that is already
+// there offers all three, so this is not the same thing as the launch mode.
+type Action = "install" | "upgrade" | "uninstall";
+type Step = "welcome" | "options" | "remove" | "working" | "done" | "error";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("install");
+  const [action, setAction] = useState<Action>("install");
   const [step, setStep] = useState<Step>("welcome");
   const [dir, setDir] = useState("");
   const [desktop, setDesktop] = useState(true);
   const [startMenu, setStartMenu] = useState(true);
   const [networkDrive, setNetworkDrive] = useState(true);
+  // Off unless asked for. The other options put this app where the user looks for it;
+  // this one changes what Windows offers for files that are not the app's own.
+  const [fileTypes, setFileTypes] = useState(false);
   const [error, setError] = useState("");
   const [existing, setExisting] = useState<string | null>(null);
+  const [dataReset, setDataReset] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -48,6 +100,11 @@ export default function App() {
       if (m === "install") {
         setDir(await invoke<string>("default_dir").catch(() => "C:\\Users\\...\\Photos for Proton"));
         setExisting(await invoke<string | null>("existing_install").catch(() => null));
+      } else {
+        // Launched as the installed uninstall.exe: there is nothing to choose here,
+        // so open on the confirmation.
+        setAction("uninstall");
+        setStep("remove");
       }
       // The window starts hidden; reveal it now that the right screen is ready
       // (avoids a flash of the empty transparent frame while the WebView loads).
@@ -67,16 +124,17 @@ export default function App() {
   // After a successful uninstall, close automatically: the detached folder cleanup
   // waits for this window to exit before it can remove the install directory.
   useEffect(() => {
-    if (mode === "uninstall" && step === "done") {
+    if (action === "uninstall" && step === "done") {
       const t = setTimeout(() => close(), 1800);
       return () => clearTimeout(t);
     }
-  }, [mode, step]);
+  }, [action, step]);
 
   async function doInstall() {
+    setAction("install");
     setStep("working");
     try {
-      await invoke("install", { dir, desktop, startMenu, networkDrive });
+      await invoke("install", { dir, desktop, startMenu, networkDrive, fileTypes });
       setStep("done");
     } catch (e) {
       setError(String(e));
@@ -84,23 +142,29 @@ export default function App() {
     }
   }
 
+  // Lay this version over the one already installed, keeping the sign-in, the
+  // cached photos, the settings and the shortcuts. It answers with whether the data
+  // had to be reset, which only a change of storage format can cause.
+  async function doUpgrade() {
+    setAction("upgrade");
+    setStep("working");
+    try {
+      setDataReset(await invoke<boolean>("upgrade"));
+      setStep("done");
+    } catch (e) {
+      setError(String(e));
+      setStep("error");
+    }
+  }
+
+  // `uninstall` removes the folder this exe lives in, which is the installed
+  // uninstall.exe removing itself; `uninstall_existing` looks the install up in the
+  // registry, which is how the installer removes one it was run over.
   async function doUninstall() {
+    setAction("uninstall");
     setStep("working");
     try {
-      await invoke("uninstall");
-      setStep("done");
-    } catch (e) {
-      setError(String(e));
-      setStep("error");
-    }
-  }
-
-  // Launched as the installer, but the app is already installed: remove it.
-  async function doUninstallExisting() {
-    setMode("uninstall");
-    setStep("working");
-    try {
-      await invoke("uninstall_existing");
+      await invoke(mode === "uninstall" ? "uninstall" : "uninstall_existing");
       setStep("done");
     } catch (e) {
       setError(String(e));
@@ -109,7 +173,9 @@ export default function App() {
   }
 
   async function launchAndClose() {
-    await invoke("launch", { dir }).catch(() => {});
+    // An upgrade leaves the app where it already was, which is not necessarily the
+    // default path the fresh-install screen offers.
+    await invoke("launch", { dir: existing ?? dir }).catch(() => {});
     close();
   }
 
@@ -123,6 +189,9 @@ export default function App() {
 
       <div className="body">
         {/* ---------- INSTALL ---------- */}
+        {/* Already installed. Upgrading is what running a newer installer is for, so
+            it is the button in reach; removing the app is a choice of its own, made
+            on its own screen, rather than what happens for running this twice. */}
         {mode === "install" && step === "welcome" && existing && (
           <div className="step center">
             <img className="logo" src={logo} alt="" />
@@ -132,11 +201,15 @@ export default function App() {
               <br />
               <span className="path">{existing}</span>
             </p>
+            <button className="btn primary wide" onClick={doUpgrade}>
+              Upgrade
+            </button>
+            <p className="hint">Updates the app to {VERSION} and keeps your sign-in, photos and settings.</p>
             <div className="footer center-footer">
               <button className="btn ghost" onClick={close}>
                 Close
               </button>
-              <button className="btn danger" onClick={doUninstallExisting}>
+              <button className="btn ghost" onClick={() => setStep("remove")}>
                 Uninstall
               </button>
             </div>
@@ -152,6 +225,7 @@ export default function App() {
               Install
             </button>
             <p className="hint">Choose your shortcuts on the next step.</p>
+            <About />
           </div>
         )}
 
@@ -160,25 +234,69 @@ export default function App() {
             <h2 className="h2">Install {APP_NAME}</h2>
             <p className="sub-left">Installs to your account folder. Choose your shortcuts:</p>
 
-            <label className="field-label">Shortcuts</label>
-            <label className="check">
-              <input type="checkbox" checked={desktop} onChange={(e) => setDesktop(e.currentTarget.checked)} />
-              <span>Desktop</span>
+            <span className="field-label">Shortcuts</span>
+            <label className="opt">
+              <span className="opt-label">Desktop</span>
+              <input
+                className="opt-switch"
+                type="checkbox"
+                checked={desktop}
+                onChange={(e) => setDesktop(e.currentTarget.checked)}
+              />
             </label>
-            <label className="check">
-              <input type="checkbox" checked={startMenu} onChange={(e) => setStartMenu(e.currentTarget.checked)} />
-              <span>Start menu</span>
+            <label className="opt">
+              <span className="opt-label">Start menu</span>
+              <input
+                className="opt-switch"
+                type="checkbox"
+                checked={startMenu}
+                onChange={(e) => setStartMenu(e.currentTarget.checked)}
+              />
             </label>
 
-            <label className="field-label mt">File Explorer</label>
-            <label className="check">
+            <span className="field-label mt">File Explorer</span>
+            {/* The note is described-by rather than wrapped in the label, so a screen
+                reader announces the switch by its short name and then the note. */}
+            <label className="opt">
+              <span className="opt-label">Show "Proton Photos" in the sidebar</span>
               <input
+                className="opt-switch"
                 type="checkbox"
+                aria-describedby="explorer-note"
                 checked={networkDrive}
                 onChange={(e) => setNetworkDrive(e.currentTarget.checked)}
               />
-              <span>Show "Proton Photos" in the sidebar</span>
             </label>
+            {/* Hydration is not user-initiated: the app registers a full hydration
+                policy, so a read by anything at all pulls the photo down. Saying "what
+                you open" would describe a policy this app does not use. */}
+            <p className="opt-desc" id="explorer-note">
+              Every photo is listed by name and date, and album names become folder names. Any program that reads
+              the folder downloads the full photo, so an antivirus scan or a backup tool can pull the whole library
+              onto this computer as ordinary files. Explorer keeps its own thumbnail cache, which survives freeing
+              up space and uninstalling. The contents are marked as not indexed, so Windows Search does not lift
+              dates or locations out of your photos.
+            </p>
+
+            <span className="field-label mt">File types</span>
+            <label className="opt">
+              <span className="opt-label">Add to the "Open with" list</span>
+              <input
+                className="opt-switch"
+                type="checkbox"
+                aria-describedby="filetypes-note"
+                checked={fileTypes}
+                onChange={(e) => setFileTypes(e.currentTarget.checked)}
+              />
+            </label>
+            {/* Honest about the ceiling: Windows protects the default handler behind a
+                hash of its own, so no installer can set one, and this does not try. */}
+            <p className="opt-desc" id="filetypes-note">
+              Lists {APP_NAME} in the Windows "Open with" menu for JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF and
+              HEIC photos, and for MP4, MOV, M4V and WebM video. Nothing becomes the default this way: Windows
+              accepts that choice only from you, under Open with &gt; Choose another app. Uninstalling takes the
+              entries back out.
+            </p>
 
             <div className="footer">
               <button className="btn ghost" onClick={() => setStep("welcome")}>
@@ -194,14 +312,16 @@ export default function App() {
         {step === "working" && (
           <div className="step center">
             <div className="spinner" />
-            <p className="working-text">{mode === "uninstall" ? "Removing..." : "Installing..."}</p>
+            <p className="working-text">
+              {action === "uninstall" ? "Removing..." : action === "upgrade" ? "Upgrading..." : "Installing..."}
+            </p>
             <div className="bar">
               <div className="bar-fill" />
             </div>
           </div>
         )}
 
-        {mode === "install" && step === "done" && (
+        {action === "install" && step === "done" && (
           <div className="step center">
             <div className="checkmark">&#x2713;</div>
             <h2 className="h2">{APP_NAME} is installed</h2>
@@ -217,14 +337,47 @@ export default function App() {
           </div>
         )}
 
+        {action === "upgrade" && step === "done" && (
+          <div className="step center">
+            <div className="checkmark">&#x2713;</div>
+            {/* Not "up to date": nothing compares versions, and running an older
+                installer over a newer install ends up on this screen too. */}
+            <h2 className="h2">
+              {APP_NAME} {VERSION} is installed
+            </h2>
+            {/* A reset only happens when this version stores its data differently
+                from the one it replaced, and it is never left to be discovered. */}
+            <p className="sub">
+              {dataReset
+                ? "This version stores its data differently, so the sign-in and the cached photos had to be cleared. Signing in again brings them back."
+                : "Your sign-in, photos and settings are as you left them."}
+            </p>
+            <div className="footer center-footer">
+              <button className="btn ghost" onClick={close}>
+                Close
+              </button>
+              <button className="btn primary" onClick={launchAndClose}>
+                Launch
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ---------- UNINSTALL ---------- */}
-        {mode === "uninstall" && step === "welcome" && (
+        {/* Reached by launching the installed uninstall.exe, or by choosing Uninstall
+            over an existing install. Cancel goes back where it came from. */}
+        {step === "remove" && (
           <div className="step center">
             <img className="logo" src={logo} alt="" />
             <h1 className="title">Uninstall {APP_NAME}?</h1>
-            <p className="sub">This removes the app and your saved data (sign-in and cached photos) from this computer.</p>
+            {/* Fully downloaded files are deliberately reverted to ordinary files and
+                kept (see `detach_one`), so this cannot claim the photos go with it. */}
+            <p className="sub">
+              This removes the app, the sign-in and the encrypted cache. Photos already downloaded to your Proton
+              Photos folder stay on this computer as ordinary files.
+            </p>
             <div className="footer center-footer">
-              <button className="btn ghost" onClick={close}>
+              <button className="btn ghost" onClick={mode === "uninstall" ? close : () => setStep("welcome")}>
                 Cancel
               </button>
               <button className="btn danger" onClick={doUninstall}>
@@ -234,7 +387,7 @@ export default function App() {
           </div>
         )}
 
-        {mode === "uninstall" && step === "done" && (
+        {action === "uninstall" && step === "done" && (
           <div className="step center">
             <div className="checkmark">&#x2713;</div>
             <h2 className="h2">{APP_NAME} has been removed</h2>
@@ -251,6 +404,8 @@ export default function App() {
             <div className="checkmark err">!</div>
             <h2 className="h2">Something went wrong</h2>
             <p className="err-text">{error}</p>
+            {/* The one screen where a reader actively needs somewhere to take this. */}
+            <About />
             <div className="footer center-footer">
               <button className="btn ghost" onClick={close}>
                 Close
@@ -259,6 +414,11 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Outside the steps, so no screen can be added without it. The app registers an
+          Explorer sidebar entry labelled "Proton Photos", which is the surface most
+          likely to be taken for Proton's own product. */}
+      <p className="legal">{DISCLAIMER}</p>
     </div>
   );
 }

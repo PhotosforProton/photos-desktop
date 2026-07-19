@@ -21,13 +21,14 @@
  */
 
 import { rpc } from "./rpc";
+import { isLightboxOpen } from "./lightboxSignal";
 
 /**
  * Lazy, bounded thumbnail loader for the grid. Cells subscribe when they scroll
- * into view; requests are batched (the API caps at 30 ids) and the decrypted
- * data-URLs are held in a small LRU, so total retained bytes stay bounded no
- * matter how large the library is. The sidecar serves repeats from its encrypted
- * on-disk cache, so re-entering a view is cheap.
+ * into view; requests are batched in small chunks and the decrypted data-URLs are
+ * held in a small LRU, so total retained bytes stay bounded no matter how large
+ * the library is. The sidecar serves repeats from its encrypted on-disk cache, so
+ * re-entering a view is cheap.
  */
 const cache = new Map<string, string | null>();
 const MAX = 500; // the visible grid plus a generous scroll buffer
@@ -61,8 +62,15 @@ async function flush(): Promise<void> {
   timer = undefined;
   if (flushing) return; // one drain loop at a time; it re-reads `pending` each batch
   flushing = true;
-  const BATCH = 30;
+  // Small, so an interactive request (a photo-open) waits at most one short batch
+  // on the single channel; the API itself caps at 30 ids.
+  const BATCH = 8;
   while (pending.size > 0) {
+    // Stand aside while the viewer is open: a photo-open needs the channel now, and
+    // these thumbnails are for cells hidden behind it. Resumes the drain on close.
+    while (isLightboxOpen()) {
+      await new Promise((r) => setTimeout(r, 150));
+    }
     // Newest-requested first, so the page you just scrolled to decrypts before the
     // rows queued earlier; and skip any that scrolled back out of view (no
     // subscribers), so no decrypt is spent on off-screen cells. New requests that

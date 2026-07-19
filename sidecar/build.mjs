@@ -1,3 +1,25 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 // Produces everything the shipped app needs to run the sidecar without Node,
 // npm or the source tree being present on the user's machine.
 //
@@ -17,6 +39,12 @@
 // that only exports a `browser` condition. Pointing it at the full `openpgp`
 // selects the proper Node build, which is why the shipped app does not need the
 // `--conditions=browser` crutch the dev spawn relies on.
+//
+// Why legalComments is none: only a handful of the bundled packages carry a
+// banner comment at all, so keeping them would deliver a partial notice and read
+// as if it were the whole one. The notices reach the user instead as
+// THIRD-PARTY-NOTICES.txt in the install folder, built from every package's own
+// declared licence, and build-setup.ps1 stages it beside app.exe.
 import { build } from "esbuild";
 import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";

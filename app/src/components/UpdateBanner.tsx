@@ -25,9 +25,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
+import { CloseIcon } from "./icons";
 import "../styles/UpdateBanner.css";
 
-type Info = { tag: string; version: string; notes: string; url: string; sha256: string | null; size: number };
+// Only what the banner shows. The download URL and digest deliberately stay on the
+// sidecar side: it re-reads them from GitHub when installing, so nothing this
+// window holds can redirect the updater or skip its hash check.
+type Info = { tag: string; version: string; notes: string; size: number };
 
 /**
  * Is `latest` a newer version than `current`? Numeric major.minor.patch first,
@@ -81,10 +85,12 @@ export function UpdateBanner() {
     setBusy(true);
     setError("");
     try {
-      const path = await rpc<string>("downloadUpdate", { url: info.url, sha256: info.sha256 });
-      await invoke("run_updater", { path }); // the app exits here; the installer takes over
+      await rpc<string>("downloadUpdate");
+      await invoke("run_updater"); // the app exits here; the installer takes over
     } catch (e) {
-      setError(String(e).includes("HASH_MISMATCH") ? t("update.hashError") : t("update.failed"));
+      const msg = String(e);
+      const bad = msg.includes("HASH_MISMATCH") || msg.includes("NO_DIGEST") || msg.includes("BAD_ORIGIN");
+      setError(bad ? t("update.hashError") : t("update.failed"));
       setBusy(false);
     }
   }
@@ -100,7 +106,7 @@ export function UpdateBanner() {
           {busy ? t("update.updating") : t("update.now")}
         </button>
         <button className="upd-x" onClick={() => setDismissed(true)} title={t("common.close")}>
-          ✕
+          <CloseIcon size={12} />
         </button>
       </span>
     </div>

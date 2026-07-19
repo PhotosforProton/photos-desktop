@@ -1,0 +1,86 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The app's one right-click menu — the profile menu's panel and rows, sized for
+   a pointer. Above the selection bar it acts on, and above the panels a click on
+   the app itself can land on, but below the dialogs it opens. */
+
+.cm {
+  position: fixed;
+  z-index: 1000;
+  min-width: 210px;
+  padding: 7px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+.cm-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 13px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg-primary);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.cm-item:enabled:hover,
+.cm-item:focus-visible {
+  background: var(--line-06);
+  outline: none;
+}
+
+/* A named placeholder: it says what is coming without offering it, so it takes
+   neither the pointer nor the keys. */
+.cm-item:disabled {
+  color: var(--fg-mute);
+  cursor: default;
+}
+
+.cm-item.danger {
+  color: var(--error);
+}
+
+.cm-item.danger:hover,
+.cm-item.danger:focus-visible {
+  background: rgba(var(--error-rgb), 0.14);
+}
+
+/* The icon keeps the dim weight until the row is pointed at, so the labels lead. */
+.cm-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+}
+
+.cm-item:enabled:hover .cm-icon,
+.cm-item:focus-visible .cm-icon {
+  color: inherit;
+}

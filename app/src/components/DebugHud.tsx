@@ -39,6 +39,12 @@ export function DebugHud({ itemCount }: { itemCount: number }) {
   const [copied, setCopied] = useState(false);
   const history = useRef<string[]>([]);
   const start = useRef(performance.now());
+  // Read the live count inside the poll without making it an effect dependency:
+  // the timeline count climbs from 0 to the whole library as it loads, and
+  // re-subscribing on every change would tear down and restart the interval each
+  // time, firing a burst of extra heapStats calls during exactly the busy startup.
+  const itemCountRef = useRef(itemCount);
+  itemCountRef.current = itemCount;
 
   useEffect(() => {
     let alive = true;
@@ -53,7 +59,7 @@ export function DebugHud({ itemCount }: { itemCount: number }) {
         h ? `sidecar=${mb(h.heapUsed)}/${mb(h.rss)}MB` : "sidecar=?",
         `thumbs=${thumbCacheSize()}`,
         `prev=${previewCacheSize()}`,
-        `items=${itemCount}`,
+        `items=${itemCountRef.current}`,
       ].join("  ");
       setLine(l);
       history.current.push(l);
@@ -65,7 +71,7 @@ export function DebugHud({ itemCount }: { itemCount: number }) {
       alive = false;
       clearInterval(id);
     };
-  }, [itemCount]);
+  }, []);
 
   const copy = () => {
     void navigator.clipboard.writeText(history.current.join("\n"));

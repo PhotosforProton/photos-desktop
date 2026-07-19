@@ -20,38 +20,121 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { TAG } from "../lib/tags";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail } from "../lib/thumbStore";
+import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
+import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
+import {
+  CheckIcon,
+  CloudIcon,
+  HeartIcon,
+  MotionPhotoIcon,
+  OfflinePinIcon,
+  PanoramaIcon,
+  PlayArrowIcon,
+  RawIcon,
+} from "./icons";
 
 export type GridItem = { uid: string; tags?: number[]; name?: string };
+
+/** The gap between tiles, matching `.g-grid` in the stylesheet. */
+const GRID_GAP = 6;
+
+/**
+ * Android drops the lower-priority corner badges as tiles shrink, so a dense grid does
+ * not crowd. It picks the tier from the grid's column count; this grid is sized rather
+ * than counted, so the tier comes from what that column count stood for — how wide a
+ * tile actually ends up.
+ *
+ * The thresholds are Android's own tile widths at its tier boundaries, on the 360dp
+ * screen its grid is laid out for (20dp side insets, 6dp between columns):
+ *
+ *   3 columns -> (360 - 40 - 12) / 3 = 102.7dp   every badge
+ *   4 columns -> (360 - 40 - 18) / 4 =  75.5dp   one secondary badge beside the cloud
+ *   5 columns -> (360 - 40 - 24) / 5 =  59.2dp   the cloud badge alone
+ *
+ * A dp and a CSS pixel are one and the same here — the badges themselves are ported at
+ * 1:1, an 18dp box as an 18px box — so those widths carry over unchanged.
+ */
+const TIER_ALL_PX = 103;
+const TIER_COMPACT_PX = 76;
+
+export type BadgeTier = "all" | "compact" | "minimal";
+
+export function badgeTier(tileWidth: number): BadgeTier {
+  if (tileWidth >= TIER_ALL_PX) return "all";
+  if (tileWidth >= TIER_COMPACT_PX) return "compact";
+  return "minimal";
+}
+
+/**
+ * What one tile ends up being, which is what the tier reads. This is the arithmetic
+ * `repeat(auto-fill, minmax(cellSize, 1fr))` performs: fit as many whole columns as the
+ * width allows once the gaps are taken out, then share the remainder between them. So a
+ * tile is never narrower than `cellSize` and is usually a little wider.
+ */
+export function tileWidth(gridWidth: number, cellSize: number): number {
+  if (gridWidth <= 0) return cellSize;
+  const columns = Math.max(1, Math.floor((gridWidth + GRID_GAP) / (cellSize + GRID_GAP)));
+  return (gridWidth - GRID_GAP * (columns - 1)) / columns;
+}
 
 const gridStyle = (cellSize: number) => ({
   gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`,
 });
+
+/**
+ * The one photo-type mark a tile can carry, and the string that names it. Videos are
+ * left out on purpose: the play icon in the middle of the tile already marks those, so
+ * a second video badge in the corner would say it twice. Same three types as Android,
+ * resolved in the same order.
+ */
+function typeBadgeOf(tags: number[] | undefined): { icon: ReactNode; key: string } | null {
+  if (!tags) return null;
+  if (tags.includes(TAG.MotionPhoto)) return { icon: <MotionPhotoIcon />, key: "badge.motionPhoto" };
+  if (tags.includes(TAG.Panorama)) return { icon: <PanoramaIcon />, key: "badge.panorama" };
+  if (tags.includes(TAG.Raw)) return { icon: <RawIcon />, key: "badge.raw" };
+  return null;
+}
 
 type CellProps = {
   item: GridItem;
   /** Provided by eager callers; `undefined` means "lazy-load when visible". */
   thumb?: string | null;
   selected: boolean;
+  /** True while anything at all is selected, which is what mutes the play icon. */
+  selectionMode?: boolean;
   onToggle?: (uid: string) => void;
   onOpen?: (uid: string) => void;
+  /** Right-click. Offered only by the views that have something to put in a menu. */
+  onContext?: (uid: string, e: MouseEvent) => void;
   showBadges?: boolean;
   showName?: boolean;
+  /** The app holds its own encrypted copy of this photo: the bottom-start pin. */
+  offline?: boolean;
+  /** Downloaded into the Proton Photos folder: the bottom-end cloud, in green. */
+  local?: boolean;
+  /** Badge density, from the tile's rendered width. */
+  tier?: BadgeTier;
   renderOverlay?: (item: GridItem) => ReactNode;
 };
 
-/** One photo tile: thumbnail, hover select dot, type badges, optional name. */
+/** One photo tile: thumbnail, hover select dot, corner badges, optional name. */
 export function PhotoCell({
   item,
   thumb,
   selected,
+  selectionMode = false,
   onToggle,
   onOpen,
+  onContext,
   showBadges = true,
   showName = false,
+  offline = false,
+  local = false,
+  tier = "all",
   renderOverlay,
 }: CellProps) {
   const t = useT();
@@ -64,35 +147,79 @@ export function PhotoCell({
     lazy ? cachedThumbnail(item.uid) : undefined,
   );
   const [loading, setLoading] = useState(false);
+
+  // The tag settles it when it is there, and nothing needs asking. When it is not, the
+  // media type does, because an absent tag is not evidence of a still: everything this
+  // app uploaded before it started tagging is a video with no tag on it. Resolved the
+  // same way the length is, once the cell is near the viewport.
+  const taggedVideo = !!item.tags?.includes(TAG.Video);
+  const [mediaType, setMediaType] = useState<string | null | undefined>(() =>
+    cachedMediaType(item.uid),
+  );
+  // Unresolved reads as "not a video" here, because a tile has to draw something now.
+  // It costs an icon that appears a moment later, never a wrong one that stays.
+  const isVideo = classifyVideo(item.tags, mediaType) ?? false;
+  const wantsMediaType = !taggedVideo && showBadges;
+
+  // A length is not in the timeline, so it has to be asked for. Only ever for a video,
+  // only where a pill could actually show, and only once the cell is near the viewport —
+  // a library's worth of videos asking on mount is the one thing that would make this
+  // expensive. The value arrives on its own and the pill appears with it.
+  const wantsDuration = isVideo && showBadges && tier !== "minimal";
+  const [durationMs, setDurationMs] = useState<number | null>(() =>
+    wantsDuration ? cachedDuration(item.uid) ?? null : null,
+  );
+
   useEffect(() => {
-    if (!lazy) return;
+    if (!lazy && !wantsDuration && !wantsMediaType) return;
     const el = ref.current;
     if (!el) return;
-    let unsub: (() => void) | undefined;
+    let unsubThumb: (() => void) | undefined;
+    let unsubDuration: (() => void) | undefined;
+    let unsubMediaType: (() => void) | undefined;
     const io = new IntersectionObserver(
       (entries) => {
         const visible = entries[entries.length - 1]?.isIntersecting;
         if (visible) {
-          const cached = cachedThumbnail(item.uid);
-          if (cached !== undefined) {
-            setSelf(cached);
-            setLoading(false);
-          } else {
-            setLoading(true);
-            unsub = requestThumbnail(item.uid, (url) => {
-              setSelf(url);
+          if (lazy) {
+            const cached = cachedThumbnail(item.uid);
+            if (cached !== undefined) {
+              setSelf(cached);
               setLoading(false);
-            });
+            } else {
+              setLoading(true);
+              unsubThumb = requestThumbnail(item.uid, (url) => {
+                setSelf(url);
+                setLoading(false);
+              });
+            }
+          }
+          if (wantsDuration && !unsubDuration) {
+            unsubDuration = requestDuration(item.uid, setDurationMs);
+          }
+          if (wantsMediaType && !unsubMediaType) {
+            unsubMediaType = requestMediaType(item.uid, setMediaType);
           }
         } else {
           // Scrolled far out of view: drop this cell's copy of the thumbnail so
           // a big library's per-cell strings cannot accumulate (the bounded LRU
           // still caches it for an instant re-entry). Keeps the JS heap tied to
           // what is on screen, not to the whole library.
-          unsub?.();
-          unsub = undefined;
-          setSelf(undefined);
-          setLoading(false);
+          if (lazy) {
+            unsubThumb?.();
+            unsubThumb = undefined;
+            setSelf(undefined);
+            setLoading(false);
+          }
+          // The length itself is kept — it is one number, and letting go of it would
+          // only mean asking for it again. This just stops a cell nobody is looking at
+          // from holding up the queue.
+          unsubDuration?.();
+          unsubDuration = undefined;
+          // Kept for the same reason as the length: it is one short string, and letting
+          // go of it would only mean asking for it again.
+          unsubMediaType?.();
+          unsubMediaType = undefined;
         }
       },
       { rootMargin: "600px" },
@@ -100,9 +227,38 @@ export function PhotoCell({
     io.observe(el);
     return () => {
       io.disconnect();
-      unsub?.();
+      unsubThumb?.();
+      unsubDuration?.();
+      unsubMediaType?.();
     };
-  }, [lazy, item.uid]);
+  }, [lazy, wantsDuration, wantsMediaType, item.uid]);
+
+  // Android's ladder, unchanged: at the compact tier the cloud badge keeps its corner and
+  // exactly one secondary joins it, picked in this order. At the smallest tier the cloud
+  // badge is alone. The play icon is not a badge and stays on every video either way.
+  const hasDuration = isVideo && durationMs !== null && durationMs > 0;
+  const typeBadge = showBadges ? typeBadgeOf(item.tags) : null;
+  const isFavorite = showBadges && !!item.tags?.includes(TAG.Favorite);
+  const secondary = hasDuration
+    ? "duration"
+    : offline
+      ? "offline"
+      : typeBadge
+        ? "type"
+        : isFavorite
+          ? "favorite"
+          : "none";
+  const allow = (which: string) =>
+    tier === "all" ? true : tier === "compact" ? secondary === which : false;
+
+  const showOffline = offline && allow("offline");
+  // The length goes away while a selection is being made, alongside the play icon —
+  // what matters then is which photos are picked. The pin stays: that one is about the
+  // photo rather than about playing it. It still takes the compact tier's one slot
+  // either way, as it does on the phone.
+  const showDuration = hasDuration && !selectionMode && allow("duration");
+  const showType = !!typeBadge && allow("type");
+  const showFavorite = isFavorite && allow("favorite");
 
   const src = lazy ? self : thumb;
   return (
@@ -112,6 +268,16 @@ export function PhotoCell({
       data-uid={item.uid}
       title={showName ? item.name : undefined}
       onClick={() => onOpen?.(item.uid)}
+      onContextMenu={
+        onContext &&
+        ((e) => {
+          e.preventDefault();
+          // This photo's menu is the answer to this right-click, so the shell's
+          // document listener must not also answer it with its own.
+          e.stopPropagation();
+          onContext(item.uid, e);
+        })
+      }
     >
       {src ? (
         <img src={src} loading="lazy" alt="" draggable={false} />
@@ -128,18 +294,48 @@ export function PhotoCell({
             onToggle(item.uid);
           }}
         >
-          {selected ? "✓" : ""}
+          {selected ? <CheckIcon size={11} /> : null}
         </span>
       )}
 
-      {showBadges && item.tags?.includes(TAG.Video) && (
+      {showBadges && isVideo && !selectionMode && (
         <div className="g-play">
-          <svg width="16" height="16" viewBox="0 0 16 16">
-            <path d="M5 3.5 L12 8 L5 12.5 Z" fill="#fff" />
-          </svg>
+          <PlayArrowIcon size={17} />
         </div>
       )}
-      {showBadges && item.tags?.includes(TAG.Favorite) && <div className="g-fav">♥</div>}
+
+      {/* Bottom-start: the offline pin and the duration sit in one row, so they read
+          side by side instead of over each other, and the row clears the bottom-end
+          corner entirely. */}
+      {(showOffline || showDuration) && (
+        <div className="g-badgerow">
+          {showOffline && (
+            <span className="g-tilebadge" title={t("photos.offline")}>
+              <OfflinePinIcon size={11} />
+            </span>
+          )}
+          {showDuration && (
+            <span className="g-tilebadge g-duration">{formatVideoTime(durationMs!)}</span>
+          )}
+        </div>
+      )}
+
+      {/* Bottom-end: the cloud, and the type mark just inside it. */}
+      {local && (
+        <span className="g-tilebadge g-cloud" title={t("photos.downloaded")}>
+          <CloudIcon size={11} />
+        </span>
+      )}
+      {(showType || showFavorite) && (
+        <div className={`g-tilebadge g-typepill ${local ? "beside-cloud" : ""}`}>
+          {showFavorite && (
+            <span title={t("badge.favorite")}>
+              <HeartIcon size={11} filled />
+            </span>
+          )}
+          {showType && <span title={t(typeBadge!.key)}>{typeBadge!.icon}</span>}
+        </div>
+      )}
 
       {renderOverlay?.(item)}
       {showName && item.name && <div className="g-cell-name">{item.name}</div>}
@@ -147,24 +343,64 @@ export function PhotoCell({
   );
 }
 
-type GridProps = Omit<CellProps, "item" | "thumb" | "selected"> & {
+type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode"> & {
   items: GridItem[];
   /** Eager thumbnails; omit to let each cell lazy-load its own (large timeline). */
   thumbs?: Record<string, string | null>;
   cellSize: number;
   selected?: Set<string>;
+  /** Photos the app keeps its own encrypted copy of. */
+  offlineUids?: Set<string>;
+  /** Photos downloaded into the Proton Photos folder. */
+  localUids?: Set<string>;
 };
 
 /** The one photo grid, shared by Photos, Albums and Shared. */
-export function PhotoGrid({ items, thumbs, cellSize, selected, ...cell }: GridProps) {
+export function PhotoGrid({
+  items,
+  thumbs,
+  cellSize,
+  selected,
+  offlineUids,
+  localUids,
+  ...cell
+}: GridProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  // The tier follows the tile a photo actually gets rather than the narrowest one the
+  // grid would accept, so it stays right if the sizes or the gap ever move. It starts
+  // from `cellSize` alone, which is the floor a tile can never go under, and settles on
+  // the measured width once there is one — and only re-renders if that changed the
+  // tier at all, so the timeline's month sections do not each pay for a second pass.
+  const [tier, setTier] = useState<BadgeTier>(() => badgeTier(cellSize));
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const apply = (w: number) => {
+      const next = badgeTier(tileWidth(w, cellSize));
+      setTier((prev) => (prev === next ? prev : next));
+    };
+    apply(el.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[entries.length - 1]?.contentRect.width;
+      if (w) apply(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [cellSize]);
+  const selectionMode = (selected?.size ?? 0) > 0;
+
   return (
-    <div className="g-grid" style={gridStyle(cellSize)}>
+    <div className="g-grid" style={gridStyle(cellSize)} ref={ref}>
       {items.map((item) => (
         <PhotoCell
           key={item.uid}
           item={item}
           thumb={thumbs ? (thumbs[item.uid] ?? null) : undefined}
           selected={!!selected?.has(item.uid)}
+          selectionMode={selectionMode}
+          offline={!!offlineUids?.has(item.uid)}
+          local={!!localUids?.has(item.uid)}
+          tier={tier}
           {...cell}
         />
       ))}

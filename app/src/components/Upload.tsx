@@ -24,6 +24,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { UploadStatus } from "../hooks/useUploads";
 import { useT } from "../lib/i18n";
+import { CheckIcon, CloseIcon, UploadArrowIcon } from "./icons";
 import "../styles/Upload.css";
 
 const MEDIA_EXTENSIONS = [
@@ -34,6 +35,8 @@ const MEDIA_EXTENSIONS = [
 type Props = {
   status: UploadStatus;
   running: boolean;
+  /** A refused upload, from here or from a drop anywhere else in the window. */
+  error: string;
   start: (paths: string[]) => Promise<void>;
   cancel: () => void;
   clear: () => void;
@@ -44,12 +47,14 @@ type Props = {
  * The upload panel. Dropping is handled window-wide by `useUploads`, so this is
  * only the picker plus the queue view; it can be opened and closed mid-upload.
  */
-export function Upload({ status, running, start, cancel, clear, onClose }: Props) {
+export function Upload({ status, running, error, start, cancel, clear, onClose }: Props) {
   const t = useT();
-  const [error, setError] = useState("");
+  // Only the file picker's own failures. A refused upload belongs to `useUploads`,
+  // which every way in shares, so both routes report through the one line below.
+  const [pickError, setPickError] = useState("");
 
   async function pick(directory: boolean) {
-    setError("");
+    setPickError("");
     try {
       const selected = await open({
         multiple: !directory,
@@ -61,7 +66,7 @@ export function Upload({ status, running, start, cancel, clear, onClose }: Props
       if (!selected) return;
       await start(Array.isArray(selected) ? selected : [selected as string]);
     } catch (e) {
-      setError(String(e));
+      setPickError(String(e));
     }
   }
 
@@ -74,12 +79,14 @@ export function Upload({ status, running, start, cancel, clear, onClose }: Props
         <div className="up-head">
           <h2 className="up-title">{t("upload.title")}</h2>
           <button className="up-x" onClick={onClose} title={t("common.close")}>
-            ✕
+            <CloseIcon size={12} />
           </button>
         </div>
 
         <div className="up-drop">
-          <div className="up-dropicon">↑</div>
+          <div className="up-dropicon">
+            <UploadArrowIcon size={20} />
+          </div>
           <p className="up-droptitle">{t("upload.dropHint")}</p>
           <p className="up-dropsub">{t("upload.dropSub")}</p>
           <div className="up-actions center">
@@ -128,7 +135,7 @@ export function Upload({ status, running, start, cancel, clear, onClose }: Props
                   {it.album && <span className="up-album">{it.album}</span>}
                   <span className="up-state">
                     {it.status === "done"
-                      ? "✓"
+                      ? <CheckIcon size={11} />
                       : it.status === "uploading"
                         ? t("upload.statusUploading")
                         : it.status === "skipped"
@@ -143,7 +150,7 @@ export function Upload({ status, running, start, cancel, clear, onClose }: Props
           </>
         )}
 
-        {error && <p className="up-error">{error}</p>}
+        {(error || pickError) && <p className="up-error">{error || pickError}</p>}
       </div>
     </div>
   );

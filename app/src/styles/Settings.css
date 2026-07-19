@@ -30,11 +30,17 @@
   backdrop-filter: blur(2px);
 }
 
+/*
+ * Two panes: the category rail on the left, the chosen category's rows on the
+ * right. Sized off the window, because the app goes down to 720x500 — the height
+ * is fixed rather than fitted to the pane, so switching category never resizes
+ * the dialog under the pointer.
+ */
 .st-panel {
-  width: min(560px, 84vw);
-  max-height: 80vh;
-  overflow-y: auto;
-  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  width: min(820px, 90vw);
+  height: min(560px, 88vh);
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -42,10 +48,12 @@
 }
 
 .st-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  padding: 13px 13px 13px 20px;
+  border-bottom: 1px solid var(--border);
 }
 .st-title {
   margin: 0;
@@ -66,16 +74,73 @@
 }
 .st-x:hover {
   background: var(--line);
-  color: #fff;
+  color: var(--fg-primary);
 }
 
-.st-section {
-  margin: 14px 0 8px;
-  font-size: 11px;
+.st-body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0; /* let the right pane scroll rather than stretch the panel */
+}
+
+/*
+ * ---- Category rail ----
+ *
+ * No fill of its own, so the rail and the content pane read as the one panel
+ * surface. What sets the two zones apart is the divider and the padding either
+ * side of it, matching the line the head already draws.
+ */
+.st-nav {
+  flex: 0 0 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 10px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+
+.st-nav-item {
+  padding: 9px 12px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--fg-mute);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.st-nav-item:hover:not(.on) {
+  background: var(--line-06);
+  color: var(--fg-primary);
+}
+.st-nav-item.on {
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- Selected category ---- */
+.st-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 18px 20px 22px;
+}
+
+.st-pane-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+.st-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .st-row {
@@ -87,6 +152,18 @@
   border: 1px solid var(--border);
   background: var(--page-bg);
   cursor: pointer;
+}
+/* A row whose setting cannot apply right now. The label stays legible — the row has
+   to be readable to explain itself — so only the switch and the pointer go. */
+.st-row.off {
+  cursor: default;
+}
+.st-row.off .st-label {
+  color: var(--fg-mute);
+}
+.st-row.off .st-switch {
+  opacity: 0.4;
+  cursor: default;
 }
 .st-text {
   flex: 1 1 auto;
@@ -104,13 +181,46 @@
   color: var(--fg-mute);
 }
 
+/* A row whose control is a way out rather than a setting: it leads to a Windows page
+   this app cannot stand in for, so it reads as secondary to the switches around it. */
+.st-row-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  margin-top: 1px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+.st-row-btn:hover {
+  border-color: var(--fg-mute);
+}
+
+/* A standalone explanation under a card, not attached to a control. */
+.st-note {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+
+/* The same line carrying a refusal instead of an explanation. */
+.st-note.bad {
+  color: var(--error);
+}
+
 /* "Restart to apply" prompt, shown after toggling the File Explorer preference. */
 .st-restart {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin: 2px 0 10px;
   padding: 10px 12px;
   background: var(--accent-wash);
   border-radius: 10px;
@@ -128,6 +238,90 @@
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+}
+
+/* ---- Storage: what each kind of local copy costs, and the button that reclaims it ---- */
+
+/* Names the block below it. The pane holds two, for the two different places a photo
+   can be kept, so each needs saying which one it is measuring. */
+.st-subhead {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fg-mute);
+  padding: 0 2px;
+}
+/* The second block starts a new group, so it gets air above it; the first sits
+   straight under the pane title. */
+.st-subhead + .st-usage {
+  margin-top: -4px;
+}
+.st-note + .st-subhead {
+  margin-top: 8px;
+}
+
+.st-usage {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 78px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+}
+.st-usage-main {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.st-usage-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-usage-size {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--fg-primary);
+}
+.st-usage-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+
+.st-free-btn {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.st-free-btn:disabled {
+  background: var(--surface-2);
+  color: var(--fg-mute);
+  cursor: default;
+}
+
+/* Determinate: the host reports done/total copies as the pass runs. */
+.st-progress {
+  height: 5px;
+  margin-top: 14px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.st-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.2s ease;
 }
 
 /* ---- Switch ---- */
@@ -159,6 +353,12 @@
 }
 .st-switch:checked::after {
   transform: translateX(18px);
+}
+/* Not accepting a click: the change it asks for is still running, or the state it
+   should be showing has not been read yet. Without this it looks live while it is not. */
+.st-switch:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ---- Segmented control (theme picker) ---- */
@@ -230,7 +430,7 @@
   gap: 9px;
   align-items: center;
   justify-content: flex-end;
-  max-width: 210px;
+  max-width: 240px; /* all seven on one row in the wider pane */
   margin-top: 1px;
 }
 

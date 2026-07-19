@@ -62,6 +62,8 @@
   border-radius: 8px;
   background: transparent;
   color: var(--fg-dim);
+  display: grid;
+  place-items: center;
   cursor: pointer;
 }
 .up-x:hover:not(:disabled) {

@@ -150,7 +150,7 @@ export function Avatar({
         {initial || "?"}
       </span>
       <span className="av-gear">
-        <GearIcon size={8} />
+        <GearIcon size={10} />
       </span>
     </button>
   );

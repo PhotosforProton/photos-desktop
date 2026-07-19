@@ -121,7 +121,24 @@ export const ProtonApi = {
   getAddressPublicKeys: (session: Session, email: string) =>
     apiFetch(`/core/v4/keys/all?Email=${encodeURIComponent(email)}&InternalOnly=1`, { session }),
   photosShare: (session: Session) => apiFetch("/drive/v2/shares/photos", { session }),
+  /** A fresh SRP modulus, signed by Proton. Minting a public link needs one. */
+  authModulus: (session: Session) => apiFetch("/core/v4/auth/modulus", { session }),
 };
+
+/**
+ * The signed modulus a public link's SRP verifier is built on, with the id the
+ * server wants back alongside the verifier. Its signature is checked where the
+ * verifier is computed, so both halves are carried together from here.
+ */
+export async function randomModulus(
+  session: Session,
+): Promise<{ modulus: string; modulusId: string }> {
+  const res = await ProtonApi.authModulus(session);
+  const modulus = String(res.Modulus ?? "");
+  const modulusId = String(res.ModulusID ?? "");
+  if (!modulus || !modulusId) throw new Error("the server returned no SRP modulus");
+  return { modulus, modulusId };
+}
 
 /** Refresh the access token using the stored refresh token (used on resume). */
 export async function refreshSession(uid: string, refreshToken: string): Promise<Session> {
@@ -149,6 +166,31 @@ export async function refreshSession(uid: string, refreshToken: string): Promise
     throw new Error(json?.Error || `token refresh failed (HTTP ${res.status})`);
   }
   return { uid: json.UID ?? uid, accessToken: json.AccessToken, refreshToken: json.RefreshToken };
+}
+
+/**
+ * The signal one attempt runs under: the caller's, the SDK's timeout, or both.
+ *
+ * The SDK's HTTP client contract makes the timeout the implementer's job, and it passes
+ * one on every request (30s for metadata, 600s for file content). Left unimplemented, a
+ * half-open connection (a laptop resuming from sleep, a captive portal) never settles
+ * the fetch, so the handler never returns and no response line is written. The host
+ * serialises every call on one channel, so that is the whole app frozen, with no error
+ * and nothing to recover from.
+ *
+ * `AbortSignal.timeout` aborts with a reason named `TimeoutError`, which is the name the
+ * SDK's own retry logic waits for, so honouring the contract is also what puts its
+ * retries into service. Composing rather than replacing keeps a real cancel reporting as
+ * `AbortError`, which the SDK treats as final instead of retrying it.
+ *
+ * The signal stays live while the response body is read, which is deliberate: a
+ * connection that delivers headers and then stalls mid-body hangs the channel exactly
+ * the same way, and this is what cuts it.
+ */
+function attemptSignal(timeoutMs: number, caller?: AbortSignal): AbortSignal | undefined {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return caller;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return caller ? AbortSignal.any([caller, timeout]) : timeout;
 }
 
 /**
@@ -210,10 +252,13 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
       url: string;
       method: string;
       headers: Headers;
+      timeoutMs: number;
       json?: object;
       body?: BodyInit;
       signal?: AbortSignal;
     }): Promise<Response> {
+      // Built per attempt, so the retry a 401 triggers is bounded on its own rather
+      // than inheriting what a slow first attempt already spent.
       return withAuthRetry(req.url, () => {
         const headers = inject(req.url, new Headers(req.headers));
         if (req.json) headers.set("Content-Type", "application/json");
@@ -221,7 +266,7 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
           method: req.method,
           headers,
           body: req.json ? JSON.stringify(req.json) : req.body,
-          signal: req.signal,
+          signal: attemptSignal(req.timeoutMs, req.signal),
         });
       });
     },
@@ -229,12 +274,18 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
       url: string;
       method: string;
       headers: Headers;
+      timeoutMs: number;
       body?: BodyInit;
       signal?: AbortSignal;
     }): Promise<Response> {
       return withAuthRetry(req.url, () => {
         const headers = inject(req.url, new Headers(req.headers));
-        return fetch(req.url, { method: req.method, headers, body: req.body, signal: req.signal });
+        return fetch(req.url, {
+          method: req.method,
+          headers,
+          body: req.body,
+          signal: attemptSignal(req.timeoutMs, req.signal),
+        });
       });
     },
   };

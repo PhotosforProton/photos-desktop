@@ -34,6 +34,33 @@ export const TAG = {
   Raw: 9,
 } as const;
 
+/**
+ * Whether a photo is really a video.
+ *
+ * The media type is the authority: it is the file's own account of itself and is there
+ * whoever uploaded it. The tag only corroborates, and only in one direction: its presence
+ * means a video, its absence means nothing at all, because a file uploaded by a client
+ * that set no tag carries none. Treating the missing tag as "not a video" is what left
+ * uploads from this app unplayable and without a play icon.
+ *
+ * `undefined` means the media type has not been resolved yet, which is not the same as a
+ * photo: a caller that must not guess can tell the two apart.
+ */
+export function isVideo(
+  tags: number[] | undefined,
+  mediaType: string | null | undefined,
+): boolean | undefined {
+  if (tags?.includes(TAG.Video)) return true;
+  if (mediaType === undefined) return undefined;
+  return (mediaType ?? "").toLowerCase().startsWith("video/");
+}
+
+/** Set or clear Favorite in a tag list, leaving every other tag as it was. */
+export function withFavorite(tags: number[] | undefined, favorite: boolean): number[] {
+  const rest = (tags ?? []).filter((t) => t !== TAG.Favorite);
+  return favorite ? [...rest, TAG.Favorite] : rest;
+}
+
 export const CATEGORIES: { key: string; label: string; tags: number[] }[] = [
   { key: "fav", label: "Favorites", tags: [TAG.Favorite] },
   { key: "screen", label: "Screenshots", tags: [TAG.Screenshot] },

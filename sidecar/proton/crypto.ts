@@ -25,7 +25,7 @@
 
 import { CryptoProxy } from "@protontech/crypto";
 import { Api as CryptoApi } from "@protontech/crypto/proxy/endpoint/api.ts";
-import { getSrp, computeKeyPassword, generateKeySalt } from "@protontech/crypto/srp";
+import { getSrp, getRandomSrpVerifier, computeKeyPassword, generateKeySalt } from "@protontech/crypto/srp";
 import { OpenPGPCryptoWithCryptoProxy } from "@protontech/drive-sdk";
 
 let initialized = false;
@@ -50,30 +50,44 @@ export function makeOpenPGPCryptoModule() {
 
 /**
  * Adapter from @protontech/crypto SRP functions to the SDK's SRPModule shape.
- * The SDK uses this for in-Drive SRP (e.g. public links); account login below
- * calls getSrp() directly with the real username.
+ * The SDK uses this for in-Drive SRP; account login calls getSrp() directly with
+ * the real username.
+ *
+ * `getModulus` is asked for one per verifier rather than handed a fixed one: the
+ * modulus must be freshly signed by the server, and it arrives with the id the
+ * server wants quoted back. It is a parameter so the caller owns the session and
+ * this module owns none.
  */
-export const srpModule = {
-  getSrp: async (
-    version: number,
-    modulus: string,
-    serverEphemeral: string,
-    salt: string,
-    password: string,
-  ) => {
-    const { clientEphemeral, clientProof, expectedServerProof } = await getSrp(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      { Version: version, Modulus: modulus, ServerEphemeral: serverEphemeral, Salt: salt, Username: "" } as any,
-      { username: "", password },
-      version,
-    );
-    return { clientEphemeral, clientProof, expectedServerProof };
-  },
-  getSrpVerifier: async () => {
-    throw new Error("getSrpVerifier is not needed for the viewer");
-  },
-  computeKeyPassword: (password: string, salt: string) => computeKeyPassword(password, salt),
-  generateKeySalt: () => generateKeySalt(),
-};
+export function makeSrpModule(getModulus: () => Promise<{ modulus: string; modulusId: string }>) {
+  return {
+    getSrp: async (
+      version: number,
+      modulus: string,
+      serverEphemeral: string,
+      salt: string,
+      password: string,
+    ) => {
+      const { clientEphemeral, clientProof, expectedServerProof } = await getSrp(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { Version: version, Modulus: modulus, ServerEphemeral: serverEphemeral, Salt: salt, Username: "" } as any,
+        { username: "", password },
+        version,
+      );
+      return { clientEphemeral, clientProof, expectedServerProof };
+    },
+    /**
+     * The verifier a new public link is minted with, and the one thing in the
+     * SDK that needs it. Drive's link SRP carries no username, so the empty one
+     * here is the scheme rather than a placeholder.
+     */
+    getSrpVerifier: async (password: string) => {
+      const { modulus, modulusId } = await getModulus();
+      const verifier = await getRandomSrpVerifier({ Modulus: modulus }, { username: "", password });
+      return { modulusId, ...verifier };
+    },
+    computeKeyPassword: (password: string, salt: string) => computeKeyPassword(password, salt),
+    generateKeySalt: () => generateKeySalt(),
+  };
+}
 
-export { getSrp };
+export { getSrp, computeKeyPassword };

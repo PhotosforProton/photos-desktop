@@ -121,31 +121,6 @@ pub fn set_auto_download(enabled: bool) {
     let _ = enabled;
 }
 
-/// The default download destination, handed to the sidecar as `destDir`.
-#[tauri::command]
-pub fn downloads_dir() -> String {
-    let path = sync_root_path();
-    let _ = std::fs::create_dir_all(&path);
-    path.to_string_lossy().into_owned()
-}
-
-/// Open the folder in Explorer — called after a download so the user immediately
-/// sees where the files landed.
-#[tauri::command]
-pub fn reveal_downloads() {
-    let path = sync_root_path();
-    let _ = std::fs::create_dir_all(&path);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("explorer.exe")
-            .arg(&path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-    }
-}
-
 /// Register the folder as a Cloud Filter sync root (so it shows in the Explorer
 /// nav pane as "Proton Photos" with the app icon, like OneDrive) and connect the
 /// sync engine (so cloud-photo placeholders hydrate on open). Runs on one
@@ -162,10 +137,6 @@ pub fn mount(app: tauri::AppHandle) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         }
-        // Sweep any hydration temp files a previous run left behind (a crash between
-        // the sidecar writing one and the host deleting it). None can be in use yet,
-        // since no hydration has run this process.
-        reap_hydrate_temps();
         let log = app.clone();
         match try_register_sync_root() {
             Ok(()) => crate::note(&log, "[cloud] sync root registered"),
@@ -184,23 +155,54 @@ pub fn mount(app: tauri::AppHandle) {
     });
 }
 
-/// Remove leftover `pfp-hyd-*.bin` hydration temp files from the system temp dir.
-/// Each is a decrypted download the sidecar staged for a placeholder transfer; the
-/// host deletes it right after the transfer, so any still present at startup are
-/// orphans from an earlier crash. None can be in use yet this run.
+/// Sweep our own leftovers out of the system temp dir at startup.
+///
+/// Five kinds accumulate, none of which can be in use while this process is only
+/// just starting:
+///   - `pfp-hyd-*.bin`: a decrypted download staged for a placeholder transfer. The
+///     host deletes each right after its transfer, so any here is an orphan from an
+///     earlier crash, and it is plaintext photo data that should not linger.
+///   - `pfp-view/`: the same thing for the viewer's full-resolution upgrade. The
+///     sidecar keeps one file there at a time and deletes it as soon as the viewer
+///     moves on, so anything left is a crash orphan and is emptied wholesale. This
+///     is also the ONLY folder the webview's asset protocol is scoped to, so leaving
+///     stale plaintext there would keep it readable as well as on disk.
+///   - `pfp-frame/`: the pictures Windows produced for the videos in an upload. The
+///     sidecar deletes each as it is spent, including for a file that turned out to
+///     be a duplicate and one the upload never reached, so anything here outlived a
+///     crash or a kill mid-upload.
+///   - `pfp-uninstall-old-*.exe`: the ~57 MB uninstaller copy an uninstall moves out
+///     of the install folder before deleting it.
+///   - `pfp-cleanup-*.ps1`: the detached post-uninstall cleanup script.
+///
+/// The last two are supposed to remove themselves once the uninstall finishes, but
+/// a script cannot reliably delete the file PowerShell is executing, so in practice
+/// they pile up (228 MB of stale uninstallers on the author's machine). Sweeping at
+/// startup does not depend on that working. Safe by timing: an uninstall kills this
+/// app, so nothing is mid-uninstall while we are booting.
 #[cfg(windows)]
-fn reap_hydrate_temps() {
+pub fn reap_temp_leftovers() {
+    // The two staging folders, emptied whole: nothing else puts a file in either.
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("pfp-view"));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(crate::upload_frame::FRAME_DIR));
+
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with("pfp-hyd-") && name.ends_with(".bin") {
+        let ours = (name.starts_with("pfp-hyd-") && name.ends_with(".bin"))
+            || (name.starts_with("pfp-uninstall-old-") && name.ends_with(".exe"))
+            || (name.starts_with("pfp-cleanup-") && name.ends_with(".ps1"));
+        if ours {
             let _ = std::fs::remove_file(entry.path());
         }
     }
 }
+
+#[cfg(not(windows))]
+pub fn reap_temp_leftovers() {}
 
 #[cfg(windows)]
 fn try_register_sync_root() -> Result<(), String> {
@@ -220,7 +222,12 @@ fn try_register_sync_root() -> Result<(), String> {
     // Re-register ONCE when the registration policy changes (bump POLICY_VERSION), so
     // a registration made by an older build with an incorrect policy is refreshed.
     // Otherwise skip — the registration persists in HKCU across reboots.
-    const POLICY_VERSION: u32 = 3;
+    //
+    // 4: the registration stores the nav-pane icon as an absolute path to the app's
+    // executable, which was renamed. Nothing else re-reads that value, so without a
+    // bump the entry keeps naming a file that no longer exists and the folder loses
+    // its icon for good.
+    const POLICY_VERSION: u32 = 4;
     let registered = id.is_registered().map_err(|e| format!("{e:?}"))?;
     if registered && policy_version() == POLICY_VERSION {
         return Ok(());
@@ -331,26 +338,11 @@ pub fn mount(_app: tauri::AppHandle) {}
 #[cfg(not(windows))]
 pub fn unmount(_app: tauri::AppHandle) {}
 
-/// Mark freshly downloaded files as "in sync" so Explorer shows them as available
-/// (a green check) rather than "waiting for sync". In a sync root a plain new file
-/// reads as a pending upload; converting it to an in-sync placeholder — data kept,
-/// NOT dehydrated — fixes the status without touching the bytes. Best-effort per
-/// file (these are Win32 Cloud Filter calls, no COM apartment needed).
-#[tauri::command]
-pub fn mark_in_sync(dir: String, names: Vec<String>) {
-    #[cfg(windows)]
-    {
-        let base = std::path::PathBuf::from(&dir);
-        for name in &names {
-            if let Err(e) = mark_one_in_sync(&base.join(name)) {
-                eprintln!("[cloud_mount] mark_in_sync skipped: {e}");
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    let _ = (dir, names);
-}
-
+/// Mark one path as "in sync" so Explorer shows it as available (a green check)
+/// rather than "waiting for sync". In a sync root a plain new entry reads as a
+/// pending upload; converting it to an in-sync placeholder (data kept, NOT
+/// dehydrated) fixes the status without touching the bytes. Used by
+/// `mark_folders_in_sync` to settle our own subfolders.
 #[cfg(windows)]
 fn mark_one_in_sync(path: &std::path::Path) -> Result<(), String> {
     use cloud_filter::placeholder::{ConvertOptions, OpenOptions};
@@ -411,6 +403,12 @@ fn mount_index() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 
 /// Record one placeholder path (relative to the sync root) for a photo. The first
 /// path recorded is its primary (`Photos\`) copy — the one Download hydrates.
+///
+/// Only ever called for a path this process created or adopted, never for one that
+/// merely bears the right name. Everything that acts on a photo acts through this
+/// index, including free-up, which discards local data. A photo whose `Photos\` copy
+/// could not be created or adopted therefore has an album copy first, or no entry at
+/// all, which is what leaves the colliding file untouched.
 #[cfg(windows)]
 fn index_push(uid: &str, rel: &str) {
     mount_index()
@@ -419,6 +417,25 @@ fn index_push(uid: &str, rel: &str) {
         .entry(uid.to_string())
         .or_default()
         .push(rel.to_string());
+}
+
+/// uid -> the size the cloud file has, as the last populate listed it. Recorded for
+/// every photo in the listing, and read by exactly one caller: the free-up fallback
+/// that discards a file's bytes, which has to establish first that the file still
+/// holds what the cloud holds.
+#[cfg(windows)]
+static MOUNT_SIZES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn mount_sizes() -> &'static std::sync::Mutex<std::collections::HashMap<String, u64>> {
+    MOUNT_SIZES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(windows)]
+fn cloud_size(uid: &str) -> Option<u64> {
+    mount_sizes().lock().unwrap().get(uid).copied()
 }
 
 /// Keep one file on the device as a proper in-sync placeholder, whatever state it is
@@ -464,6 +481,26 @@ fn keep_offline_one(
     }
 }
 
+/// What the file already sitting at one of our names turned out to be.
+///
+/// Two questions get asked of that file and they are not the same one. "Did this
+/// pass have to fix anything?" only feeds a log count. "Does this path belong to
+/// the mount?" decides whether the index may list it, and everything that acts on
+/// a photo acts through the index, including free-up, which discards local data.
+/// Collapsing the two is what left the index empty on every populate after the
+/// first: a cloud-only placeholder needs no work, which is not the same as it not
+/// being ours, and unindexed it could not be downloaded or freed up at all.
+#[cfg(windows)]
+#[derive(PartialEq)]
+enum Existing {
+    /// Ours, and this pass fixed it up (marked in sync, or converted back).
+    Adopted,
+    /// Ours, and there was nothing to do.
+    Ours,
+    /// Someone else's file that merely shares the name. Never indexed.
+    Foreign,
+}
+
 /// Bring a file left on disk by a previous install back into the sync engine.
 ///
 /// `PlaceholderFile::create` fails on a name collision, so after a reinstall the
@@ -474,52 +511,159 @@ fn keep_offline_one(
 /// check returns and a later free-up / re-hydrate can still find the photo. If the
 /// file is already a placeholder, convert fails and re-asserting in-sync is enough.
 #[cfg(windows)]
-fn reconcile_existing(app: &tauri::AppHandle, path: &std::path::Path, uid: &str) -> bool {
+fn reconcile_existing(
+    app: &tauri::AppHandle,
+    path: &std::path::Path,
+    uid: &str,
+    size: u64,
+) -> Existing {
     use cloud_filter::placeholder::OpenOptions;
-    // Probe with the crate's oplock handle: an existing placeholder (dehydrated or
-    // hydrated) just needs to read in-sync so it is not stranded on "waiting to sync".
-    // The handle is dropped before any conversion — CfConvertToPlaceholder needs a
-    // plain Win32 handle instead of the oplock one.
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    // Decide from the directory entry, BEFORE opening anything.
+    //
+    // A cloud-only placeholder is already exactly what populate would have created,
+    // so there is nothing here to reconcile. That matters far more than the wasted
+    // work: every open below goes through `CfOpenFileWithOplock`, the crate offers
+    // no no-recall flag, and to the Cloud Filter driver an open with write access is
+    // a data access. So opening one to ask "are you alright?" downloads it.
+    //
+    // Every populate after the first hits this path for the WHOLE library, because
+    // by then every placeholder exists and `create` fails on all of them. That is
+    // what made "Sync now" pull the entire library: not a download the button asked
+    // for, just the inspection itself.
+    let Some(entry) = file_attribute_data(path) else {
+        return Existing::Foreign; // unreadable: nothing may act on it
+    };
+    if entry.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
+        // Cloud-only: already exactly what populate would have created, so there is
+        // no work to do. It is still ours, and saying otherwise is what stopped
+        // Download and Free up finding anything on the second and every later run.
+        return Existing::Ours;
+    }
+    // It holds data, so an open cannot recall anything. Probe with the crate's oplock
+    // handle: an existing hydrated placeholder just needs to read in-sync so it is not
+    // stranded on "waiting to sync". The handle is dropped before any conversion —
+    // CfConvertToPlaceholder needs a plain Win32 handle instead of the oplock one.
     match OpenOptions::new().write_access().open(path) {
         Ok(mut ph) => {
             if ph.info().ok().flatten().is_some() {
-                return ph.mark_in_sync(true, None).is_ok();
+                // It carries placeholder state, so it is one of ours holding data.
+                // The in-sync mark is cosmetic (it settles Explorer's status column),
+                // and failing to set it does not make the photo someone else's.
+                let _ = ph.mark_in_sync(true, None);
+                return Existing::Adopted;
             }
         }
-        Err(_) => return false,
+        Err(_) => return Existing::Foreign,
     }
-    // A plain file that lost its placeholder status: convert it back (data kept), with
-    // its uid blob restored.
+    // A plain file holding data, sharing a name with one of the cloud photos. It is
+    // either our own copy left behind by an earlier install, or a file the user put
+    // here that merely collides: camera names repeat constantly, which is the whole
+    // reason `unique_name` exists.
+    //
+    // Adopting the wrong one is unrecoverable. The uid goes on, the file joins the
+    // mount index, and the next free-up dehydrates it, discarding bytes that were
+    // never in Proton, under a button that promises the photos stay there. So a shared
+    // name is not proof of ownership; the exact byte size matching the cloud file as
+    // well is close enough. Anything else is left completely alone: a stray "waiting
+    // to sync" badge is cosmetic, destroying someone's only copy is not.
+    let on_disk = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
+    if on_disk != size {
+        return Existing::Foreign;
+    }
     match convert_file_to_placeholder(path, uid, false) {
-        Ok(()) => true,
+        Ok(()) => Existing::Adopted,
         Err(e) => {
             // No file name / uid in the log — just the outcome and the OS error.
+            // Without the uid blob attached nothing could act on it correctly anyway,
+            // so it stays out of the index.
             crate::note(app, &format!("[reconcile] convert failed: {e}"));
-            false
+            Existing::Foreign
         }
     }
 }
 
-/// Where the auto-download "seen" snapshot lives (the library uid list from the
-/// previous populate). Kept next to sidecar.log in the app data dir.
+// ---- The mount's own uid lists ----
+//
+// Two of them: the snapshot of what the library held at the last populate, and the
+// albums the user asked to keep on this device. Both are sealed with the app's data
+// key now, like everything else in that directory. A node uid names one photo in the
+// account, so a plain list of them was a readable index of the library sitting among
+// caches that are all encrypted, next to a thumbnail store that is content-addressed
+// precisely so no uid ever appears in a file name.
+//
+// Sealed rather than hashed, even though set membership is all the "seen" snapshot
+// ever needs: the album list is read back OUT again (`synced_albums` hands it to the
+// Albums view, and populate looks each uid up in ALBUM_INDEX), so a one-way digest
+// cannot serve it. One mechanism for both is simpler than two, and it reuses a key
+// the app already manages.
+
+/// The library snapshot from the previous populate, and the albums kept offline.
+///
+/// Both keep the names they have always had, and only their contents change. The
+/// sidecar deletes these two paths BY NAME when the account signs out, so that one
+/// account's uid list can never greet the next one signing in on this machine.
+/// Renaming them here would leave that sweep deleting files nobody writes any more,
+/// and the stale snapshot would then make every photo in the next account look new
+/// to the auto-download pass.
 #[cfg(windows)]
-fn seen_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    crate::secure_store::app_dir(app).ok().map(|d| d.join("mount_seen.txt"))
+const SEEN_LIST: &str = "mount_seen.txt";
+#[cfg(windows)]
+const ALBUM_LIST: &str = "synced_albums.txt";
+
+/// Read one list, taking over the plain one an older build wrote to the same path.
+///
+/// A sealed blob only ever comes back through `read_sealed`, which authenticates it,
+/// so the fallback cannot be reached by an unreadable or tampered one being mistaken
+/// for text. What it will accept as a legacy list is checked for shape first, and
+/// anything else is reported as no list at all, which every caller reads as "nothing
+/// recorded yet". That is the safe answer in both directions: guessing wrong the
+/// other way would hand the auto-download pass a baseline of nonsense, and every
+/// photo in the account would look like a new arrival to be pulled down.
+#[cfg(windows)]
+fn load_uid_list(app: &tauri::AppHandle, file: &str) -> Option<String> {
+    if let Ok(Some(text)) = crate::secure_store::read_sealed(app, file) {
+        return Some(text);
+    }
+    let path = crate::secure_store::app_dir(app).ok()?.join(file);
+    let text = std::fs::read_to_string(path).ok()?;
+    if !looks_like_uid_list(&text) {
+        return None;
+    }
+    // Sealed in place, at the same path. Left alone if that fails, so a list is
+    // never lost to a write that did not happen.
+    save_uid_list(app, file, &text);
+    Some(text)
+}
+
+/// Whether a file's contents can be one of these lists: uids, and nothing else. The
+/// character set is what a node uid is made of, base64url with its padding and the
+/// separator between the two halves.
+#[cfg(windows)]
+fn looks_like_uid_list(text: &str) -> bool {
+    text.lines().all(|line| {
+        line.trim()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+/_-=~.".contains(c))
+    })
+}
+
+#[cfg(windows)]
+fn save_uid_list(app: &tauri::AppHandle, file: &str, text: &str) {
+    let _ = crate::secure_store::write_sealed(app, file, text);
 }
 
 /// The uids present at the last populate, or None if there is no snapshot yet
 /// (a first run, which only seeds the snapshot and downloads nothing).
 #[cfg(windows)]
 fn load_seen(app: &tauri::AppHandle) -> Option<std::collections::HashSet<String>> {
-    let text = std::fs::read_to_string(seen_path(app)?).ok()?;
+    let text = load_uid_list(app, SEEN_LIST)?;
     Some(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
 }
 
 #[cfg(windows)]
 fn save_seen(app: &tauri::AppHandle, uids: &[String]) {
-    if let Some(path) = seen_path(app) {
-        let _ = std::fs::write(path, uids.join("\n"));
-    }
+    save_uid_list(app, SEEN_LIST, &uids.join("\n"));
 }
 
 /// Older builds created placeholders directly at the sync-root top level; this
@@ -545,20 +689,63 @@ fn cleanup_stale_root(folder: &std::path::Path) {
     }
 }
 
-/// Whether the mount is mid-sync right now, mirrored from `set_busy` so the tray
-/// popup (a separate window that may open at any moment) can show the current state
-/// without waiting for the next `mount-busy` transition.
+/// How many heavy sidecar operations (populate, per-file hydration, album sync) are
+/// in flight right now. The mount is "busy" whenever this is above zero.
+///
+/// A depth counter, not a bool, because these operations nest: `pin_selected` and the
+/// populate passes hold it while their inner `fetch_data` hydrations take it again
+/// (`ph.hydrate` inside `keep_offline_one` drives the sync engine's `fetch_data` on a
+/// separate thread). A bare bool's inner release would clear the busy state while the
+/// outer work is still running, letting the thumbnail warmer pile back on too early.
+/// With the counter, only the outermost pair flips the state.
 #[cfg(windows)]
-static SYNC_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BUSY_DEPTH: std::sync::Mutex<i32> = std::sync::Mutex::new(0);
 
 /// Tell the UI the mount is doing heavy sidecar work (populate / hydration), so the
 /// background thumbnail warmer pauses and lets that work own the single sidecar RPC
-/// channel. Paired true/false around each heavy operation.
+/// channel. Paired true/false around each heavy operation (see `BusyGuard`); only the
+/// outermost pair actually flips the state, so nested operations never clear it early.
 #[cfg(windows)]
 fn set_busy(app: &tauri::AppHandle, busy: bool) {
     use tauri::Emitter;
-    SYNC_BUSY.store(busy, std::sync::atomic::Ordering::Relaxed);
-    let _ = app.emit("mount-busy", busy);
+    let mut depth = BUSY_DEPTH.lock().unwrap();
+    let was_busy = *depth > 0;
+    if busy {
+        *depth += 1;
+    } else if *depth > 0 {
+        *depth -= 1;
+    }
+    let now_busy = *depth > 0;
+    // Emit only on the real idle<->busy transition, and while still holding the lock,
+    // so the warmer's pause/resume events can never arrive out of order with the depth
+    // changes that caused them.
+    if now_busy != was_busy {
+        let _ = app.emit("mount-busy", now_busy);
+    }
+}
+
+/// RAII pairing for `set_busy`: marks the mount busy while alive and clears that mark
+/// on drop, so every exit path (an early `?`, an error return, a panic) still releases
+/// it. Essential in `fetch_data`, which has several early returns where a bare
+/// `set_busy(false)` at the end would be skipped.
+#[cfg(windows)]
+struct BusyGuard {
+    app: tauri::AppHandle,
+}
+
+#[cfg(windows)]
+impl BusyGuard {
+    fn new(app: &tauri::AppHandle) -> Self {
+        set_busy(app, true);
+        BusyGuard { app: app.clone() }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        set_busy(&self.app, false);
+    }
 }
 
 /// The current sync state, for the tray popup's status line (live updates arrive via
@@ -567,21 +754,108 @@ fn set_busy(app: &tauri::AppHandle, busy: bool) {
 pub fn sync_busy() -> bool {
     #[cfg(windows)]
     {
-        SYNC_BUSY.load(std::sync::atomic::Ordering::Relaxed)
+        *BUSY_DEPTH.lock().unwrap() > 0
     }
     #[cfg(not(windows))]
     false
+}
+
+/// A path's directory entry — attributes and size — WITHOUT opening it. `None` if
+/// the path is unreadable.
+///
+/// Never use `std::fs::metadata` on anything inside the sync root. It opens the
+/// file to stat it, and to the Cloud Filter driver an open that is not flagged
+/// no-recall is a data access: merely asking "is this file downloaded?" downloads
+/// it. That is not theoretical. It is what made the app pull the entire library
+/// on its own: the 4-second `hydrated_uids` poll stat-ed every placeholder, so
+/// hydration began the moment populate filled the index and never stopped.
+/// `GetFileAttributesExW` reads the directory entry instead and never touches the
+/// file's data, so it cannot trigger a recall.
+#[cfg(windows)]
+fn file_attribute_data(
+    path: &std::path::Path,
+) -> Option<windows::Win32::Storage::FileSystem::WIN32_FILE_ATTRIBUTE_DATA> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileAttributesExW, GetFileExInfoStandard, WIN32_FILE_ATTRIBUTE_DATA,
+    };
+    let mut data = WIN32_FILE_ATTRIBUTE_DATA::default();
+    let wide = HSTRING::from(path.as_os_str());
+    unsafe {
+        GetFileAttributesExW(
+            &wide,
+            GetFileExInfoStandard,
+            &mut data as *mut _ as *mut core::ffi::c_void,
+        )
+    }
+    .ok()?;
+    Some(data)
+}
+
+/// A path's attributes, read from its directory entry. See `file_attribute_data` for
+/// why this never goes through `std::fs::metadata`.
+#[cfg(windows)]
+fn file_attributes(path: &std::path::Path) -> Option<u32> {
+    file_attribute_data(path).map(|d| d.dwFileAttributes)
+}
+
+/// Keep the photos out of the Windows Search index's content extraction.
+///
+/// The whole of `%USERPROFILE%` is the indexer's default crawl scope, and a
+/// downloaded photo here is an ordinary JPEG, so the photo property handler runs
+/// over it and lifts its EXIF into the index in plaintext, GPS coordinates and all.
+/// That outlives the photo: freeing the space back up does not remove what the
+/// index already extracted, so a single open would leave a permanent trace of where
+/// the picture was taken.
+///
+/// `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` stops the filter and property handlers from
+/// running at all. The name, size and dates stay indexed, but those are on the
+/// placeholder for anyone to read anyway; the EXIF is not. Setting it also purges
+/// whatever the index already holds for the file.
+///
+/// A folder passes this to files created inside it LATER, but not to ones already
+/// there, so placeholders are marked individually as well. Cheap and idempotent:
+/// one directory-entry read, and a write only when the bit is actually missing.
+#[cfg(windows)]
+fn mark_not_indexed(path: &std::path::Path) {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES};
+    const NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+    let Some(current) = file_attributes(path) else {
+        return;
+    };
+    if current & NOT_CONTENT_INDEXED != 0 {
+        return;
+    }
+    let wide = HSTRING::from(path.as_os_str());
+    let _ = unsafe {
+        SetFileAttributesW(&wide, FILE_FLAGS_AND_ATTRIBUTES(current | NOT_CONTENT_INDEXED))
+    };
 }
 
 /// Whether one placeholder (relative path from the sync root) is hydrated (has its
 /// data on the device). Dehydrated cloud-only placeholders carry RECALL_ON_DATA_ACCESS.
 #[cfg(windows)]
 fn is_hydrated(base: &std::path::Path, rel: &str) -> bool {
-    use std::os::windows::fs::MetadataExt;
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    std::fs::metadata(base.join(rel))
-        .map(|m| m.file_attributes() & RECALL_ON_DATA_ACCESS == 0)
+    file_attributes(&base.join(rel))
+        .map(|a| a & RECALL_ON_DATA_ACCESS == 0)
         .unwrap_or(false)
+}
+
+/// The bytes one placeholder holds on the device, or `None` if it is cloud-only. A
+/// dehydrated placeholder still reports the full size of the file it stands for, so
+/// the size alone says nothing about local storage — the recall flag is what
+/// separates "on this device" from "in the cloud". One directory-entry read serves
+/// both, and neither can trigger a recall.
+#[cfg(windows)]
+fn hydrated_size(base: &std::path::Path, rel: &str) -> Option<u64> {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let data = file_attribute_data(&base.join(rel))?;
+    if data.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
+        return None;
+    }
+    Some(((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64)
 }
 
 /// Convert a plain file (one that lost its placeholder status, e.g. after the sync
@@ -656,26 +930,45 @@ fn album_index() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
     ALBUM_INDEX.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-#[cfg(windows)]
-fn synced_albums_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    crate::secure_store::app_dir(app).ok().map(|d| d.join("synced_albums.txt"))
-}
-
 /// The album uids the user chose to keep offline (empty if none).
 #[cfg(windows)]
 fn load_synced_albums(app: &tauri::AppHandle) -> std::collections::HashSet<String> {
-    synced_albums_path(app)
-        .and_then(|p| std::fs::read_to_string(p).ok())
+    load_uid_list(app, ALBUM_LIST)
         .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
         .unwrap_or_default()
 }
 
 #[cfg(windows)]
 fn save_synced_albums(app: &tauri::AppHandle, set: &std::collections::HashSet<String>) {
-    if let Some(p) = synced_albums_path(app) {
-        let list: Vec<&str> = set.iter().map(String::as_str).collect();
-        let _ = std::fs::write(p, list.join("\n"));
+    let list: Vec<&str> = set.iter().map(String::as_str).collect();
+    save_uid_list(app, ALBUM_LIST, &list.join("\n"));
+}
+
+/// One album's own copies: the `Albums\<name>\` placeholder paths ALBUM_INDEX
+/// recorded for it during populate.
+///
+/// This is the only thing that ever says which copies belong to an album, and it
+/// says it in paths that populate itself created. A photo's `Photos\` copy and its
+/// copy in any other album are different placeholders at different paths, so they
+/// are not in here and cannot be caught by anything acting on this list. Nothing
+/// is ever matched by name.
+#[cfg(windows)]
+fn album_copies(album_uid: &str) -> Vec<String> {
+    album_index().lock().unwrap().get(album_uid).cloned().unwrap_or_default()
+}
+
+/// rel -> photo uid, so a copy that has lost its placeholder status can be
+/// converted back with its blob.
+#[cfg(windows)]
+fn rel_to_uid() -> std::collections::HashMap<String, String> {
+    let index = mount_index().lock().unwrap();
+    let mut m = std::collections::HashMap::new();
+    for (u, rs) in index.iter() {
+        for r in rs {
+            m.insert(r.clone(), u.clone());
+        }
     }
+    m
 }
 
 /// Hydrate every not-yet-local photo of one album (its `Albums\<name>\` copies, so
@@ -683,18 +976,8 @@ fn save_synced_albums(app: &tauri::AppHandle, set: &std::collections::HashSet<St
 #[cfg(windows)]
 fn hydrate_album(app: &tauri::AppHandle, album_uid: &str) {
     let base = sync_root_path();
-    let rels: Vec<String> = album_index().lock().unwrap().get(album_uid).cloned().unwrap_or_default();
-    // rel -> photo uid, so a stranded regular file can be converted back with its blob.
-    let rev: std::collections::HashMap<String, String> = {
-        let index = mount_index().lock().unwrap();
-        let mut m = std::collections::HashMap::new();
-        for (u, rs) in index.iter() {
-            for r in rs {
-                m.insert(r.clone(), u.clone());
-            }
-        }
-        m
-    };
+    let rels = album_copies(album_uid);
+    let rev = rel_to_uid();
     let mut n = 0usize;
     for rel in &rels {
         if !is_hydrated(&base, rel) && keep_offline_one(app, &base, rel, rev.get(rel).map(String::as_str)) {
@@ -720,9 +1003,68 @@ pub fn synced_albums(app: tauri::AppHandle) -> Vec<String> {
     }
 }
 
+/// How many of one album's own copies are on this device, so the app can ask about
+/// the storage only when there is some to reclaim. Attributes only, never a read:
+/// stat-ing a placeholder by opening it would hydrate the very photos being counted.
+#[tauri::command]
+pub async fn album_local_count(uid: String) -> u32 {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let base = sync_root_path();
+            album_copies(&uid).iter().filter(|rel| is_hydrated(&base, rel)).count() as u32
+        })
+        .await
+        .unwrap_or(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = uid;
+        0
+    }
+}
+
+/// Free up what one album downloaded, and nothing else.
+///
+/// Scoped entirely through ALBUM_INDEX, so only this album's own `Albums\<name>\`
+/// copies are touched. A photo kept offline in its own right holds a separate
+/// `Photos\` placeholder that is not in this list and survives untouched, and so
+/// does its copy in every other album. Two photos sharing a name are two paths and
+/// are never confused for each other. Returns how many copies are no longer on this
+/// device. Off the main thread: a large album is a long pass.
+#[tauri::command]
+pub async fn free_up_album(app: tauri::AppHandle, uid: String) -> u32 {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let base = sync_root_path();
+            let rev = rel_to_uid();
+            let mut freed = 0u32;
+            for rel in album_copies(&uid) {
+                // No uid means the copy is not in the mount's index, so there is no
+                // blob to restore it with and it is not ours to touch.
+                let Some(photo) = rev.get(&rel) else { continue };
+                if free_up_one(&app, &base, photo, &rel) {
+                    freed += 1;
+                }
+            }
+            crate::note(&app, &format!("[album-sync] freed {freed} album copies"));
+            freed
+        })
+        .await
+        .unwrap_or(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, uid);
+        0
+    }
+}
+
 /// Toggle "keep this album on this device". Enabling hydrates its photos now and
 /// (via populate) keeps future additions to the album downloaded too. Disabling
-/// stops the auto-sync but leaves already-downloaded photos in place.
+/// stops the auto-sync; what it already downloaded is the caller's to ask about,
+/// through `album_local_count` and `free_up_album`.
 #[tauri::command]
 pub fn set_album_synced(app: tauri::AppHandle, uid: String, enabled: bool) {
     #[cfg(windows)]
@@ -736,9 +1078,8 @@ pub fn set_album_synced(app: tauri::AppHandle, uid: String, enabled: bool) {
         save_synced_albums(&app, &set);
         if enabled {
             std::thread::spawn(move || {
-                set_busy(&app, true);
+                let _busy = BusyGuard::new(&app);
                 hydrate_album(&app, &uid);
-                set_busy(&app, false);
             });
         }
     }
@@ -774,15 +1115,37 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         &self,
         request: cloud_filter::filter::Request,
         ticket: cloud_filter::filter::ticket::FetchData,
-        _info: cloud_filter::filter::info::FetchData,
+        info: cloud_filter::filter::info::FetchData,
     ) -> cloud_filter::error::CResult<()> {
         use cloud_filter::error::CloudErrorKind;
         use cloud_filter::utility::WriteAt;
         use std::io::Read;
 
+        // Hydrating a whole file holds the single sidecar channel; mark the mount busy
+        // for the duration so the thumbnail warmer pauses instead of piling on. The
+        // guard clears it on every return path below (download failure, size mismatch,
+        // transfer error, success). It nests: when this hydration was triggered by
+        // `pin_selected` or a populate pass, that outer guard keeps the busy state set
+        // across the gap, so nothing is cleared early.
+        let _busy = BusyGuard::new(&self.app);
+
         let uid = String::from_utf8_lossy(request.file_blob()).into_owned();
         let want = request.file_size();
-        crate::note(&self.app, &format!("[cloud] hydrate start (size={want})"));
+        // Diagnostic: name the process that triggered this hydration (exe basename only,
+        // no path or PII) and whether it was an explicit pin ("keep offline") or an
+        // implicit read. A "the app downloads my whole library on its own" report is
+        // almost always some background reader (SearchIndexer.exe, MsMpEng.exe / an
+        // antivirus, explorer.exe thumbnails) touching cloud-only placeholders, which
+        // under the Full hydration policy pulls each entire file. This line shows who.
+        let by = request
+            .process()
+            .path()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "unknown".into());
+        crate::note(
+            &self.app,
+            &format!("[cloud] hydrate start (size={want} by={by} explicit={})", info.explicit_hydration()),
+        );
         // The sidecar streams the download to a temp file; we transfer that into the
         // placeholder a chunk at a time so a large video never sits in memory.
         let (temp, got) = crate::hydrate_to_temp(&self.app, &uid).map_err(|e| {
@@ -874,12 +1237,19 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
 pub fn populate_mount(app: tauri::AppHandle) {
     #[cfg(windows)]
     std::thread::spawn(move || {
-        set_busy(&app, true);
+        // Opting out has to actually opt out. The frontend calls this as soon as the
+        // timeline loads, with no idea of the preference, so the gate belongs here
+        // rather than at the caller: otherwise a user who turned the Explorer
+        // integration off still got the folder tree, one subfolder named after each
+        // of their albums, and the uid snapshot written to disk.
+        if !show_in_explorer_enabled() {
+            return;
+        }
+        let _busy = BusyGuard::new(&app);
         // Startup pass: honours the "auto-download new photos" setting.
         if let Err(e) = try_populate(&app, true) {
             eprintln!("[cloud_mount] populate failed: {e}");
         }
-        set_busy(&app, false);
     });
     #[cfg(not(windows))]
     let _ = app;
@@ -894,12 +1264,18 @@ pub fn populate_mount(app: tauri::AppHandle) {
 pub fn sync_now(app: tauri::AppHandle) {
     #[cfg(windows)]
     std::thread::spawn(move || {
-        set_busy(&app, true);
-        // `false` = never auto-download the whole library; only synced albums sync.
-        if let Err(e) = try_populate(&app, false) {
-            eprintln!("[cloud_mount] sync_now failed: {e}");
+        // Only touch the mount when the user opted into it. The view refresh below is
+        // worth doing either way, so the button still means something with the
+        // Explorer integration off.
+        if show_in_explorer_enabled() {
+            // Scoped to this block, so the busy mark is cleared before the refresh
+            // below, exactly where the paired call used to clear it.
+            let _busy = BusyGuard::new(&app);
+            // `false` = never auto-download the whole library; only synced albums sync.
+            if let Err(e) = try_populate(&app, false) {
+                eprintln!("[cloud_mount] sync_now failed: {e}");
+            }
         }
-        set_busy(&app, false);
         // Reload the open window's timeline / albums, like a manual refresh.
         use tauri::Emitter;
         let _ = app.emit("refresh-view", ());
@@ -919,16 +1295,26 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
 
     let folder = sync_root_path();
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    // Idempotent across an unexpected second run in one process.
+    mark_not_indexed(&folder);
+    // Idempotent across an unexpected second run in one process. The sizes go with
+    // the index they belong to: a free-up that overlaps a populate then finds no size
+    // for a moment and declines to convert, which is the harmless direction.
     mount_index().lock().unwrap().clear();
+    mount_sizes().lock().unwrap().clear();
     cleanup_stale_root(&folder);
 
     let photos_dir = folder.join("Photos");
     std::fs::create_dir_all(&photos_dir).map_err(|e| e.to_string())?;
+    mark_not_indexed(&photos_dir);
 
     // Page through the photos so the sidecar RPC lock is released between pages,
-    // keeping the app responsive (thumbnails keep loading) during populate.
-    const PAGE: u64 = 40;
+    // keeping the app responsive (thumbnails keep loading) during populate. A page is
+    // held uninterruptibly while the sidecar answers it, so it is kept small: on a cold
+    // first run its uncached photos are resolved in one batched lookup — a single links
+    // request plus a per-photo name decrypt — and a short page bounds that hold to about
+    // two seconds, so waiting thumbnails are admitted between pages. On later runs the
+    // sidecar answers a page from cache in milliseconds.
+    const PAGE: u64 = 4;
     let mut offset = 0u64;
     let mut made = 0usize;
     let mut reconciled = 0usize;
@@ -947,9 +1333,6 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
         )?;
         let items = result.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-        if items.is_empty() {
-            break;
-        }
 
         for item in &items {
             let uid = item.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
@@ -961,26 +1344,57 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
             let ft = unix_ms_to_filetime(item.get("captureTime").and_then(|v| v.as_i64()).unwrap_or(0));
             let base = sanitize_name(name);
             let unique = unique_name(&base, &mut photos_seen);
-            index_push(uid, &format!("Photos\\{unique}"));
             meta.insert(uid.to_string(), (base, size, ft));
+            mount_sizes().lock().unwrap().insert(uid.to_string(), size);
             all_uids.push(uid.to_string());
 
             let placeholder = PlaceholderFile::new(&unique)
                 .mark_in_sync() // it faithfully mirrors the cloud file: in sync, not "pending"
                 .metadata(Metadata::file().size(size).creation_time(ft).last_write_time(ft))
                 .blob(uid.as_bytes().to_vec());
-            if placeholder.create::<&std::path::Path>(&photos_dir).is_ok() {
+            let owned = if placeholder.create::<&std::path::Path>(&photos_dir).is_ok() {
                 made += 1;
-            } else if reconcile_existing(app, &photos_dir.join(&unique), uid) {
-                // A copy from a previous install already sits here (create only fails
-                // on a name collision). Reconcile it so it is not stranded on "waiting
-                // to sync" and the app still sees it as kept offline.
-                reconciled += 1;
+                true
+            } else {
+                // A copy already sits here; create only fails on a name collision.
+                // One of ours from an earlier run is reconciled so it is not stranded
+                // on "waiting to sync" and the app still sees it as kept offline. It
+                // predates the folder's no-index bit, so it does not inherit it.
+                match reconcile_existing(app, &photos_dir.join(&unique), uid, size) {
+                    Existing::Adopted => {
+                        reconciled += 1;
+                        true
+                    }
+                    Existing::Ours => true,
+                    Existing::Foreign => false,
+                }
+            };
+            // Indexed only once this pass established that the path belongs to the
+            // mount: either `create` made it, or `reconcile_existing` matched the
+            // cloud file byte for byte and adopted it. A collision with a file the
+            // user dropped in the folder fails both, and camera names repeat
+            // constantly, so this is not a corner case. Indexing it regardless is
+            // what let free-up reach it later and convert it into a dehydrated
+            // placeholder carrying another photo's uid, throwing away bytes that
+            // were never in Proton. The check that refuses to adopt such a file is a
+            // few lines up, in `reconcile_existing`; the index must not be a way
+            // around it.
+            if owned {
+                index_push(uid, &format!("Photos\\{unique}"));
             }
+            // After the copy exists, either way: a fresh placeholder inherits the
+            // folder's bit, but that inheritance is undocumented, and an already
+            // downloaded copy predates the folder entirely and would otherwise keep
+            // handing its EXIF to the indexer.
+            mark_not_indexed(&photos_dir.join(&unique));
         }
 
         offset += PAGE;
-        if total > 0 && offset >= total {
+        // Stop once the whole listing has been paged. The end is the slice running out
+        // (offset past the total), not an empty page: a page whose photos were all
+        // skipped — vanished server-side, or carrying no positive-size revision — is not
+        // the end, and keying off `items` being empty would truncate the mount before it.
+        if total == 0 || offset >= total {
             break;
         }
         // Let the app's thumbnail RPCs run before the next page.
@@ -1066,6 +1480,7 @@ fn populate_albums(
         return;
     }
     let _ = std::fs::create_dir_all(albums_dir);
+    mark_not_indexed(albums_dir);
 
     let mut album_dir_seen: HashSet<String> = HashSet::new();
     let mut made = 0usize;
@@ -1081,6 +1496,7 @@ fn populate_albums(
         if std::fs::create_dir_all(&album_folder).is_err() {
             continue;
         }
+        mark_not_indexed(&album_folder);
         let mut file_seen: HashSet<String> = HashSet::new();
         let mut members: Vec<String> = Vec::new();
         for u in &uids {
@@ -1092,17 +1508,24 @@ fn populate_albums(
                 .mark_in_sync()
                 .metadata(Metadata::file().size(*size).creation_time(*ft).last_write_time(*ft))
                 .blob(uid.as_bytes().to_vec());
-            if placeholder.create::<&std::path::Path>(&album_folder).is_ok() {
+            let owned = if placeholder.create::<&std::path::Path>(&album_folder).is_ok() {
                 made += 1;
+                true
             } else {
-                // A copy from a previous install already sits here: reconcile it so
-                // Explorer shows the green check instead of "waiting to sync".
-                reconcile_existing(app, &album_folder.join(&unique), uid);
+                // A copy already sits here: reconcile it so Explorer shows the green
+                // check instead of "waiting to sync". A cloud-only one needs nothing
+                // doing and is ours all the same, so only a foreign file is excluded.
+                reconcile_existing(app, &album_folder.join(&unique), uid, *size) != Existing::Foreign
+            };
+            mark_not_indexed(&album_folder.join(&unique));
+            // Indexed only once it belongs to the mount, on the same grounds as the
+            // `Photos\` pass: an album copy that was neither created nor adopted is
+            // someone else's file with a name that happens to match, and both indexes
+            // lead straight to hydrating and dehydrating whatever they list.
+            if owned {
+                index_push(uid, &rel);
+                members.push(rel);
             }
-            // Index every copy either way, so album-sync and free-up act on this
-            // `Albums\` copy even when it pre-existed and create was skipped.
-            index_push(uid, &rel);
-            members.push(rel);
         }
         if !album_uid.is_empty() {
             album_index().lock().unwrap().insert(album_uid.to_string(), members);
@@ -1136,103 +1559,211 @@ fn unique_name(base: &str, seen: &mut std::collections::HashSet<String>) -> Stri
 /// One entry per photo, ending as a green check — no duplicate file, no "waiting to
 /// sync". Runs off the main thread; unknown uids (not yet populated) are skipped.
 #[tauri::command]
-pub fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) {
+pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
     #[cfg(windows)]
-    std::thread::spawn(move || {
-        let base = sync_root_path();
-        // The primary (`Photos\`) copy of each selection, paired with its uid. Album
-        // copies stay cloud-only until opened, so a download never silently duplicates
-        // every album photo on disk. Keeping offline never pins ("always keep"), which
-        // is what made "Free up space" fail with 0x8007017B.
-        let pairs: Vec<(String, String)> = {
-            let index = mount_index().lock().unwrap();
-            uids.iter()
-                .filter_map(|u| index.get(u).and_then(|v| v.first()).map(|rel| (u.clone(), rel.clone())))
-                .collect()
-        };
-        crate::note(
-            &app,
-            &format!("[download] make offline: {} of {} selected found in the mount", pairs.len(), uids.len()),
-        );
-        let ok = pairs
-            .iter()
-            .filter(|(uid, rel)| keep_offline_one(&app, &base, rel, Some(uid.as_str())))
-            .count();
-        crate::note(&app, &format!("[download] kept {ok} offline (freeable)"));
-    });
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            // Keep the mount busy for the whole pin pass so the warmer pauses. Each
+            // photo's `ph.hydrate` drives `fetch_data` (which takes the guard again);
+            // the counter keeps busy set across the gaps between photos, so it is not
+            // cleared early after the first one.
+            let _busy = BusyGuard::new(&app);
+            let base = sync_root_path();
+            // The primary (`Photos\`) copy of each selection, paired with its uid. Album
+            // copies stay cloud-only until opened, so a download never silently duplicates
+            // every album photo on disk. Keeping offline never pins ("always keep"), which
+            // is what made "Free up space" fail with 0x8007017B.
+            let pairs: Vec<(String, String)> = {
+                let index = mount_index().lock().unwrap();
+                uids.iter()
+                    .filter_map(|u| index.get(u).and_then(|v| v.first()).map(|rel| (u.clone(), rel.clone())))
+                    .collect()
+            };
+            // Counts only, no uids: how many of the selection the mount knows about, so a
+            // shortfall separates "not in the index yet" from "the hydrate failed".
+            crate::note(
+                &app,
+                &format!("[download] make offline: {} of {} selected found in the mount", pairs.len(), uids.len()),
+            );
+            let ok = pairs
+                .iter()
+                .filter(|(uid, rel)| keep_offline_one(&app, &base, rel, Some(uid.as_str())))
+                .count() as u32;
+            crate::note(&app, &format!("[download] kept {ok} offline (freeable)"));
+            ok
+        })
+        .await
+        .unwrap_or(0)
+    }
     #[cfg(not(windows))]
-    let _ = (app, uids);
+    {
+        let _ = (app, uids);
+        0
+    }
 }
 
-/// App-side "remove download / free up space": dehydrate the selected files back to
-/// cloud-only placeholders via `CfDehydratePlaceholder` directly. This is the
-/// provider's own dehydrate call and does NOT go through Explorer's "Free up space"
-/// (which a not-in-sync placeholder blocks before the callback). Logs the exact
-/// error per file, so a failure pinpoints the cause.
-#[tauri::command]
-pub fn free_up_selected(app: tauri::AppHandle, uids: Vec<String>) {
-    #[cfg(windows)]
-    std::thread::spawn(move || {
-        use cloud_filter::ext::FileExt;
-        use std::os::windows::fs::MetadataExt;
-        const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-        let base = sync_root_path();
-        // Free every copy (the `Photos\` one and each album), paired with its uid so a
-        // copy that lost its placeholder status can be converted back with its blob.
-        let pairs: Vec<(String, Vec<String>)> = {
-            let index = mount_index().lock().unwrap();
-            uids.iter().filter_map(|u| index.get(u).map(|r| (u.clone(), r.clone()))).collect()
-        };
-        let mut ok = 0usize;
-        for (uid, rels) in pairs {
-            for rel in rels {
-                let path = base.join(&rel);
-                // Skip a copy that is already cloud-only (e.g. an unopened album copy).
-                match std::fs::metadata(&path) {
-                    Ok(meta) if meta.file_attributes() & RECALL_ON_DATA_ACCESS != 0 => continue,
-                    Ok(_) => {}
-                    Err(_) => continue,
-                }
-                // Normal path: dehydrate the placeholder in place.
-                if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-                    if file.dehydrate(..).is_ok() {
-                        ok += 1;
-                        continue;
-                    }
-                }
-                // A placeholder left not-in-sync by a failed/interrupted hydrate blocks
-                // the dehydrate above (and the shell's own delete, which reports "the
-                // cloud provider is not running"). Force it back in-sync, then dehydrate,
-                // to reset it to a clean cloud-only placeholder that deletes normally.
-                {
-                    use cloud_filter::placeholder::OpenOptions;
-                    if let Ok(mut ph) = OpenOptions::new().write_access().open(&path) {
-                        if ph.info().ok().flatten().is_some() {
-                            let _ = ph.mark_in_sync(true, None);
-                        }
-                    } // release the oplock handle before the std dehydrate
-                    if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-                        if file.dehydrate(..).is_ok() {
-                            ok += 1;
-                            continue;
-                        }
-                    }
-                }
-                // The copy lost its placeholder status (a plain "waiting to sync" file, so
-                // CfDehydratePlaceholder fails with "not a cloud file"): convert it straight
-                // to a DEHYDRATED placeholder, which reclaims the space and restores the
-                // cloud status in one step.
-                match convert_file_to_placeholder(&path, &uid, true) {
-                    Ok(()) => ok += 1,
-                    // No file name / uid in the log — just the outcome and the OS error.
-                    Err(e) => crate::note(&app, &format!("[freeup] convert-dehydrate failed: {e}")),
-                }
+/// Free up one copy: dehydrate it back to a cloud-only placeholder via
+/// `CfDehydratePlaceholder` directly. This is the provider's own dehydrate call and
+/// does NOT go through Explorer's "Free up space" (which a not-in-sync placeholder
+/// blocks before the callback). `true` once the local data is gone; a copy that is
+/// already cloud-only counts as neither freed nor failed. Logs the exact error, so a
+/// failure pinpoints the cause.
+#[cfg(windows)]
+fn free_up_one(app: &tauri::AppHandle, base: &std::path::Path, uid: &str, rel: &str) -> bool {
+    use cloud_filter::ext::FileExt;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let path = base.join(rel);
+    // Skip a copy that is already cloud-only (e.g. an unopened album copy).
+    // Attributes only: stat-ing this by opening it would hydrate the very
+    // file we are here to free up. The same directory entry carries the size
+    // the last fallback below has to check, so one read serves both.
+    let Some(entry) = file_attribute_data(&path) else {
+        return false;
+    };
+    if entry.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
+        return false;
+    }
+    // Normal path: dehydrate the placeholder in place.
+    if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        if file.dehydrate(..).is_ok() {
+            return true;
+        }
+    }
+    // A placeholder left not-in-sync by a failed/interrupted hydrate blocks
+    // the dehydrate above (and the shell's own delete, which reports "the
+    // cloud provider is not running"). Force it back in-sync, then dehydrate,
+    // to reset it to a clean cloud-only placeholder that deletes normally.
+    {
+        use cloud_filter::placeholder::OpenOptions;
+        if let Ok(mut ph) = OpenOptions::new().write_access().open(&path) {
+            if ph.info().ok().flatten().is_some() {
+                let _ = ph.mark_in_sync(true, None);
+            }
+        } // release the oplock handle before the std dehydrate
+        if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            if file.dehydrate(..).is_ok() {
+                return true;
             }
         }
-        crate::note(&app, &format!("[freeup] freed {ok}"));
-    });
+    }
+    // The copy lost its placeholder status (a plain "waiting to sync" file, so
+    // CfDehydratePlaceholder fails with "not a cloud file"): convert it straight
+    // to a DEHYDRATED placeholder, which reclaims the space and restores the
+    // cloud status in one step.
+    //
+    // This branch is the one that ASSERTS the file is the cloud file's copy, rather
+    // than being told so: the two attempts above act on a placeholder, where the
+    // driver already knows what the local data stands for, while this one attaches a
+    // uid to a plain file and drops its bytes in the same call. So the same test the
+    // rest of this file turns on applies here too, and for the same reason: a size
+    // that no longer matches means the file is not that copy, whatever its name says.
+    // `reconcile_existing` refuses to adopt on it, and free-up must refuse to destroy
+    // on it.
+    let on_disk = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
+    if cloud_size(uid) != Some(on_disk) {
+        // Counts only, no name or uid: enough to see that a copy was passed over.
+        crate::note(app, "[freeup] size does not match the cloud file, left alone");
+        return false;
+    }
+    match convert_file_to_placeholder(&path, uid, true) {
+        Ok(()) => true,
+        // No file name / uid in the log — just the outcome and the OS error.
+        Err(e) => {
+            crate::note(app, &format!("[freeup] convert-dehydrate failed: {e}"));
+            false
+        }
+    }
+}
+
+/// App-side "remove download / free up space" for a selection. Returns how many
+/// photos are no longer on this device, which is what the caller reports.
+/// Off the main thread: a large selection is a long pass.
+#[tauri::command]
+pub async fn free_up_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let base = sync_root_path();
+            // Free every copy (the `Photos\` one and each album), paired with its uid so a
+            // copy that lost its placeholder status can be converted back with its blob.
+            let pairs: Vec<(String, Vec<String>)> = {
+                let index = mount_index().lock().unwrap();
+                uids.iter().filter_map(|u| index.get(u).map(|r| (u.clone(), r.clone()))).collect()
+            };
+            let mut ok = 0u32;
+            for (uid, rels) in &pairs {
+                // Every copy is freed, so no short-circuit; the photo counts once, because
+                // the caller counts photos and a photo can hold an album copy per album.
+                let mut any = false;
+                for rel in rels {
+                    if free_up_one(&app, &base, uid, rel) {
+                        any = true;
+                    }
+                }
+                if any {
+                    ok += 1;
+                }
+            }
+            crate::note(&app, &format!("[freeup] freed {ok}"));
+            ok
+        })
+        .await
+        .unwrap_or(0)
+    }
     #[cfg(not(windows))]
-    let _ = (app, uids);
+    {
+        let _ = (app, uids);
+        0
+    }
+}
+
+/// The Settings "free up all" action: every local copy in the library, in one pass,
+/// so the space can be reclaimed without selecting photos one by one. Nothing is
+/// deleted — the photos stay in the cloud and hydrate again on demand. Emits
+/// "freeup-progress" (done/total copies) as it goes and returns how many were freed.
+/// Off the main thread: a whole-library pass is long.
+#[tauri::command]
+pub async fn free_up_all(app: tauri::AppHandle) -> u32 {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            use tauri::Emitter;
+            let base = sync_root_path();
+            // Snapshot the index and drop the lock: the pass is long, and populate needs
+            // the lock to refresh placeholders while it runs.
+            let pairs: Vec<(String, Vec<String>)> = {
+                let index = mount_index().lock().unwrap();
+                index.iter().map(|(uid, rels)| (uid.clone(), rels.clone())).collect()
+            };
+            let total: usize = pairs.iter().map(|(_, rels)| rels.len()).sum();
+            let mut done = 0usize;
+            let mut freed = 0u32;
+            for (uid, rels) in &pairs {
+                for rel in rels {
+                    if free_up_one(&app, &base, uid, rel) {
+                        freed += 1;
+                    }
+                    done += 1;
+                    // Throttled: an event per copy would flood the channel on a big library.
+                    if done % 25 == 0 || done == total {
+                        let _ = app.emit(
+                            "freeup-progress",
+                            serde_json::json!({ "done": done, "total": total }),
+                        );
+                    }
+                }
+            }
+            crate::note(&app, &format!("[freeup] freed {freed} of {total} copies"));
+            freed
+        })
+        .await
+        .unwrap_or(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        0
+    }
 }
 
 /// The uids whose placeholder is hydrated (kept offline, "available on this
@@ -1242,23 +1773,89 @@ pub fn free_up_selected(app: tauri::AppHandle, uids: Vec<String>) {
 pub fn hydrated_uids() -> Vec<String> {
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
         let base = sync_root_path();
         let index = mount_index().lock().unwrap();
         index
             .iter()
             .filter_map(|(uid, rels)| {
                 // Local if any copy (the `Photos\` one or an album) is hydrated.
-                let any = rels.iter().any(|rel| {
-                    std::fs::metadata(base.join(rel))
-                        .map(|m| m.file_attributes() & RECALL_ON_DATA_ACCESS == 0)
-                        .unwrap_or(false)
-                });
+                // `file_attributes`, never `std::fs::metadata`: this runs on every
+                // placeholder every few seconds, and stat-ing one by opening it would
+                // hydrate the whole library just for asking.
+                let any = rels.iter().any(|rel| is_hydrated(&base, rel));
                 any.then(|| uid.clone())
             })
             .collect()
     }
     #[cfg(not(windows))]
     Vec::new()
+}
+
+#[cfg(all(test, windows))]
+mod uid_list_tests {
+    use super::looks_like_uid_list;
+
+    /// One uid as the mount stores it: two base64url halves joined by a tilde.
+    const UID: &str = "aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgcmVhbGx5IGE=~dWlkIGJ1dCBpdCBpcyB0aGUgcmlnaHQgc2hhcGU=";
+
+    #[test]
+    fn a_plain_list_is_recognised() {
+        assert!(looks_like_uid_list(""));
+        assert!(looks_like_uid_list(UID));
+        assert!(looks_like_uid_list(&format!("{UID}\n{UID}\n")));
+        assert!(looks_like_uid_list(&format!("{UID}\r\n{UID}")), "CRLF is still a list");
+    }
+
+    #[test]
+    fn anything_else_is_not_a_list() {
+        // What matters is the direction of the mistake: read as a list, a file of
+        // rubbish becomes an auto-download baseline that makes every photo in the
+        // account look new.
+        assert!(!looks_like_uid_list("\u{1}\u{2}\u{3}"), "control bytes are not a uid");
+        assert!(!looks_like_uid_list("{\"seen\":[]}"), "nor is anything punctuated");
+        assert!(!looks_like_uid_list("two words"), "nor is prose");
+    }
+}
+
+/// What the local copies cost, for the Settings storage panel.
+#[derive(Default, serde::Serialize)]
+pub struct LocalUsage {
+    bytes: u64,
+    photos: usize,
+}
+
+/// Measure the library's footprint on this device. Every hydrated copy counts — the
+/// `Photos\` one and each album's — because each holds its own bytes and a free-up
+/// drops all of them; a photo with any copy here counts once. Off the main thread:
+/// it is one directory-entry read per placeholder, and a large library has many.
+#[tauri::command]
+pub async fn local_usage() -> LocalUsage {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            let base = sync_root_path();
+            // Snapshot the index and drop the lock; populate must not wait behind this.
+            let all: Vec<Vec<String>> = mount_index().lock().unwrap().values().cloned().collect();
+            let mut usage = LocalUsage::default();
+            for rels in &all {
+                let mut bytes = 0u64;
+                let mut local = false;
+                for rel in rels {
+                    if let Some(n) = hydrated_size(&base, rel) {
+                        bytes += n;
+                        local = true;
+                    }
+                }
+                if local {
+                    usage.bytes += bytes;
+                    usage.photos += 1;
+                }
+            }
+            usage
+        })
+        .await
+        .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    LocalUsage::default()
 }

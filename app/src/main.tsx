@@ -26,18 +26,40 @@ import { invoke } from "@tauri-apps/api/core";
 // Tokens first: every other stylesheet resolves its colours against them.
 import "./styles/theme.css";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { TrayPopup } from "./views/TrayPopup";
+import { ViewerWindow } from "./views/ViewerWindow";
 import { LangProvider } from "./lib/i18n";
 import { applyTheme, type ThemeMode } from "./lib/theme";
 
-// The Rust host loads this same frontend into a frameless, transparent window
-// labelled "tray_popup". When that is the window we are in, render the little
-// tray menu instead of the full app.
-const isTrayPopup = getCurrentWindow().label === "tray_popup";
+/**
+ * A line in the app's log, from the page.
+ *
+ * Everything below this point can throw, and until now a throw up here was completely
+ * silent: React never mounted, so the error boundary did not exist to catch it, and
+ * the window came up as an empty transparent pane with the log saying nothing at all.
+ * These few breadcrumbs are what turn that into a report.
+ *
+ * Fire and forget, and never allowed to fail: a log line must not be the thing that
+ * stops the app starting.
+ */
+function boot(step: string) {
+  void invoke("log_note", { message: `boot ${step}` }).catch(() => {});
+}
 
-// The tray popup skips <App/>, so it has to restore the saved theme itself the
-// way App does, otherwise it would always paint in the default dark palette.
-if (isTrayPopup) {
+boot("module");
+
+// One bundle, three windows. The host loads this same frontend into each of them, so
+// what to render is decided by which window this is running in and never by state:
+// they are separate processes' worth of React, with nothing shared between them but
+// what the host holds.
+const label = getCurrentWindow().label;
+const isTrayPopup = label === "tray_popup";
+const isViewer = label === "viewer";
+
+// Only <App/> restores the theme as part of starting up, so the two windows that skip
+// it have to do it themselves or they always paint in the default dark palette.
+if (isTrayPopup || isViewer) {
   (async () => {
     try {
       const raw = await invoke<string | null>("store_get", { name: "settings" });
@@ -51,19 +73,26 @@ if (isTrayPopup) {
   })();
 }
 
+// Outside the language provider on purpose: it has to survive a fault in the very
+// thing that would translate its message.
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <LangProvider>{isTrayPopup ? <TrayPopup /> : <App />}</LangProvider>,
+  <ErrorBoundary>
+    <LangProvider>
+      {isTrayPopup ? <TrayPopup /> : isViewer ? <ViewerWindow /> : <App />}
+    </LangProvider>
+  </ErrorBoundary>,
 );
 
-// The main window ships hidden (visible:false) so the empty transparent frame is
-// never seen while the WebView loads. Reveal it once the first frame has painted.
-// The tray popup manages its own visibility (shown on tray right-click), so leave it.
-if (!isTrayPopup) {
-  const win = getCurrentWindow();
+boot(`rendered ${label}`);
+
+// Both real windows ship hidden so the empty transparent frame is never seen while the
+// WebView loads. The app's is revealed once the first frame has painted; the viewer
+// waits for the file it was opened for and asks for itself. The tray popup owns its own
+// visibility (shown on a tray click), so it is left alone.
+if (!isTrayPopup && !isViewer) {
   requestAnimationFrame(() =>
     requestAnimationFrame(() => {
-      void win.show();
-      void win.setFocus();
+      void invoke("reveal_window").catch(() => {});
     }),
   );
 }

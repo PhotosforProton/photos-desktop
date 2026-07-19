@@ -7,6 +7,15 @@
     "core:default",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "dialog:allow-open"
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://akoos.eu" },
+        { "url": "https://www.photosforproton.eu" },
+        { "url": "https://github.com/PhotosforProton/photos-desktop" },
+        { "url": "https://github.com/PhotosforProton/photos-desktop/issues" },
+        { "url": "mailto:github@akoos.eu" }
+      ]
+    }
   ]
 }

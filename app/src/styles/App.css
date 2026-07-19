@@ -253,41 +253,6 @@ body {
   padding: 0;
 }
 
-/* ---- Custom context menu (right-click) ---- */
-.context-menu {
-  position: fixed;
-  z-index: 1000;
-  min-width: 160px;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-}
-
-.context-menu li {
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  color: var(--fg-primary);
-  cursor: pointer;
-}
-
-.context-menu li:hover {
-  background: var(--accent-wash-strong);
-}
-
-.context-menu li.disabled {
-  color: var(--fg-mute);
-  cursor: default;
-}
-
-.context-menu li.disabled:hover {
-  background: transparent;
-}
-
 /* This is an app, not a web page: no text selection, no image dragging. */
 .app-shell {
   user-select: none;

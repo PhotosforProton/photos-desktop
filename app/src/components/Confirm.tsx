@@ -29,6 +29,11 @@ type Props = {
   message: string;
   confirmLabel: string;
   danger?: boolean;
+  /**
+   * For an action with no way back. Enter stops confirming and the focus rests
+   * on Cancel, so the button has to be aimed at and hit deliberately.
+   */
+  irreversible?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -38,17 +43,27 @@ type Props = {
  * so Escape closes this dialog rather than also clearing a selection or the
  * lightbox behind it.
  */
-export function Confirm({ title, message, confirmLabel, danger, onConfirm, onCancel }: Props) {
+export function Confirm({
+  title,
+  message,
+  confirmLabel,
+  danger,
+  irreversible,
+  onConfirm,
+  onCancel,
+}: Props) {
   const t = useT();
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       e.stopPropagation();
       if (e.key === "Escape") onCancel();
-      else if (e.key === "Enter") onConfirm();
+      // Enter is a reflex on a dialog, which is fine for something the trash can
+      // give back, and not fine for something nothing can.
+      else if (e.key === "Enter" && !irreversible) onConfirm();
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onCancel, onConfirm]);
+  }, [onCancel, onConfirm, irreversible]);
 
   return (
     <div
@@ -63,12 +78,12 @@ export function Confirm({ title, message, confirmLabel, danger, onConfirm, onCan
         <h3 className="cf-title">{title}</h3>
         <p className="cf-msg">{message}</p>
         <div className="cf-actions">
-          <button className="cf-btn" onClick={onCancel}>
+          <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
             {t("common.cancel")}
           </button>
           <button
             className={`cf-btn ${danger ? "danger" : "primary"}`}
-            autoFocus
+            autoFocus={!irreversible}
             onClick={onConfirm}
           >
             {confirmLabel}

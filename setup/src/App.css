@@ -89,14 +89,23 @@ body {
 .body {
   flex: 1;
   display: flex;
-  padding: 8px 34px 30px;
+  padding: 8px 34px 16px;
+  /* The window is a fixed size and cannot be resized, so anything that does not fit
+     used to be cut off in silence. Scrolling is the honest failure. */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
 }
 
 .step {
   width: 100%;
   display: flex;
   flex-direction: column;
+  /* `safe`: centring an overflowing column puts its first lines above the scroll
+     origin, where nothing can bring them back. Plain `center` first, for a runtime
+     that drops the keyword. */
   justify-content: center;
+  justify-content: safe center;
 }
 .step.center {
   align-items: center;
@@ -108,7 +117,7 @@ body {
   height: 108px;
 }
 .title {
-  margin-top: 18px;
+  margin-top: 14px;
   font-size: 27px;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -126,7 +135,7 @@ body {
   color: var(--fg-dim);
 }
 .hint {
-  margin-top: 14px;
+  margin-top: 10px;
   font-size: 12px;
   color: var(--fg-mute);
 }
@@ -167,7 +176,7 @@ body {
   background: var(--accent);
 }
 .btn.wide {
-  margin-top: 26px;
+  margin-top: 20px;
   min-width: 200px;
 }
 .btn.ghost {
@@ -194,19 +203,114 @@ body {
   margin-bottom: 8px;
   display: block;
 }
-.check {
+.field-label.mt {
+  margin-top: 16px;
+}
+
+/* ---- Options ---- */
+.opt {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 0;
-  font-size: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 6px 0;
   cursor: pointer;
 }
-.check input {
-  width: 17px;
-  height: 17px;
-  accent-color: var(--accent);
+.opt-label {
+  font-size: 14px;
+  line-height: 24px; /* the switch height, so the two align */
+}
+.opt-desc {
+  padding-right: 56px; /* clear of the switch above it */
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+
+/* A real checkbox, restyled as a switch (same idea as the app's .st-switch). */
+.opt-switch {
+  flex: 0 0 auto;
+  appearance: none;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.opt-switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--fg-mute);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.opt-switch:checked {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+.opt-switch:checked::after {
+  transform: translateX(18px);
+  background: #fff;
+}
+.opt:hover .opt-switch:not(:checked) {
+  background: var(--border);
+}
+.opt-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- About ---- */
+.about {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+  max-width: 430px;
+}
+.about-what {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.about-links {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--fg-mute);
+}
+/* Shown on every screen, so it sits in the window's chrome rather than in a step.
+   --fg-mute would land it at 3.4:1 on this background, under the 4.5:1 floor; this
+   clears the floor while staying a step below body text, which is where fine print
+   belongs. */
+.legal {
+  flex: 0 0 auto;
+  padding: 0 40px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: #837f95;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 3px;
+}
+.link:hover {
+  text-decoration: underline;
+}
+.link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .footer {
@@ -217,7 +321,12 @@ body {
   gap: 10px;
 }
 .center-footer {
-  margin-top: 26px;
+  /* Only to override .footer's margin-top:auto, which would push the footer to the
+     bottom of the window: a centred screen wants it with the content. The gap above
+     it is .footer's own padding-top, and doubling that with a margin here cost 26px
+     on every centred screen, which the window, fixed and not resizable, has none of
+     to spare. */
+  margin-top: 0;
   justify-content: center;
 }
 

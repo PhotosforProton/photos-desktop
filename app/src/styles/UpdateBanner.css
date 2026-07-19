@@ -72,6 +72,8 @@
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
+  display: grid;
+  place-items: center;
 }
 .upd-x:hover {
   color: var(--fg-primary);

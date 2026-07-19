@@ -34,6 +34,7 @@ export const de: Record<string, string> = {
   "nav.photos": "Fotos",
   "nav.albums": "Alben",
   "nav.shared": "Geteilt",
+  "nav.trash": "Papierkorb",
 
   // App shell
   "app.restoring": "Sitzung wird wiederhergestellt…",
@@ -51,6 +52,10 @@ export const de: Record<string, string> = {
   "tray.syncNow": "Jetzt synchronisieren",
   "tray.syncing": "Wird synchronisiert…",
   "tray.synced": "Auf dem neuesten Stand",
+  "tray.locked": "Gesperrt",
+  "tray.lockedHint": "Zum Entsperren öffnen",
+  "tray.signedOut": "Nicht angemeldet",
+  "tray.signedOutHint": "Zum Anmelden öffnen",
 
   // Login
   "login.subtitle": "Melde dich bei deinem Proton-Konto an",
@@ -79,6 +84,9 @@ export const de: Record<string, string> = {
 
   // Settings
   "settings.title": "Einstellungen",
+  "settings.general": "Allgemein",
+  "settings.launchAtLogin": "Mit Windows starten",
+  "settings.launchAtLoginDesc": "Startet beim Anmelden bei Windows im Hintergrund. Bis zum Öffnen ist nur das Symbol im Infobereich zu sehen.",
   "settings.appearance": "Darstellung",
   "settings.theme": "Design",
   "settings.themeDesc": "System folgt Windows und passt sich weiter an, wenn sich das Design ändert.",
@@ -110,11 +118,50 @@ export const de: Record<string, string> = {
     "Fügt der Explorer-Seitenleiste einen Eintrag für Proton Photos mit deinen Cloud-Fotos hinzu. Wird nach einem Neustart wirksam.",
   "settings.autoDownload": "Neue Fotos automatisch herunterladen",
   "settings.autoDownloadDesc":
-    "Sobald neue Fotos zu deiner Bibliothek hinzukommen, wird automatisch eine Kopie auf diesem Gerät behalten.",
+    "Sobald neue Fotos zu deiner Bibliothek hinzukommen, werden sie automatisch in den Ordner Proton Photos heruntergeladen.",
+  "settings.autoDownloadNeedsExplorer":
+    'Funktioniert nur, wenn "Proton Photos" im Datei-Explorer angezeigt wird, und das ist ausgeschaltet. Das Herunterladen funktioniert weiterhin: Du wirst gefragt, wo deine Fotos gespeichert werden sollen.',
   "settings.restartNeeded": "Starte neu, um diese Änderung anzuwenden.",
   "settings.restartNow": "Jetzt neu starten",
+  // File types. The "Open with" entries are the app's own to add and take back out;
+  // the default handler is not, so that half leads out to Windows rather than
+  // pretending to a choice Windows takes from the user alone.
+  "settings.fileTypes": "Dateitypen",
+  "settings.openWith": 'Zur Liste "Öffnen mit" hinzufügen',
+  "settings.openWithDesc":
+    'Führt Photos for Proton im Windows-Menü "Öffnen mit" für JPEG-, PNG-, GIF-, WebP-, AVIF-, BMP-, TIFF- und HEIC-Fotos sowie für MP4-, MOV-, M4V- und WebM-Videos auf. Beim Ausschalten werden die Einträge wieder entfernt.',
+  "settings.fileTypesFailed": "Die Dateitypen konnten nicht geändert werden. Bitte versuche es erneut.",
+  "settings.defaultApp": "Standard-App für Fotos und Videos",
+  "settings.defaultAppDesc":
+    "So wird nichts zur Standard-App: Diese Wahl akzeptiert Windows nur von dir, nie von einem Programm. Wähle Photos for Proton in den Windows-Einstellungen unter Standard-Apps aus.",
+  "settings.defaultAppOpen": "Windows-Einstellungen öffnen",
+  "settings.defaultAppFailed": "Die Windows-Einstellungen konnten nicht geöffnet werden. Bitte versuche es erneut.",
   "settings.lockOnHideDesc":
     "Wird das Fenster in die Taskleiste geschlossen, sperrt sich die App und fragt beim nächsten Öffnen nach deinem Passwort.",
+  "settings.storage": "Speicher",
+  // Two different places a photo can be kept on this machine: encrypted inside the
+  // app, or downloaded into the Proton Photos folder where Windows can read it. The
+  // panel names both rather than adding one number to the other.
+  "settings.downloadedCount.one": "{count} Foto heruntergeladen",
+  "settings.downloadedCount.other": "{count} Fotos heruntergeladen",
+  "settings.downloadedNone": "Nichts heruntergeladen",
+  "settings.downloadedDesc":
+    "Heruntergeladene Fotos sind gewöhnliche Dateien im Ordner Proton Photos, sodass die Windows-Suche und andere Programme sie lesen können. Beim Freigeben werden nur diese lokalen Kopien entfernt, und deine Fotos bleiben bei Proton.",
+  "settings.freeUpAll": "{size} freigeben",
+  "settings.freeUpNothing": "Nichts freizugeben",
+  "settings.freeingUp": "Wird freigegeben…",
+  "settings.storageOffline": "Offline-Fotos",
+  "settings.storageExplorer": "Im Datei-Explorer",
+  "settings.offlineCount.one": "{count} Foto in der App",
+  "settings.offlineCount.other": "{count} Fotos in der App",
+  "settings.offlineNone": "Keine Fotos in der App gespeichert",
+  "settings.offlineDesc":
+    "Fotos, die du als offline verfügbar markierst, bleiben verschlüsselt in der App. Sie lassen sich ohne Verbindung öffnen und erscheinen nie im Ordner Proton Photos, sodass nichts außerhalb der App sie lesen kann.",
+  "settings.offlineSaving": "Wird gespeichert {done}/{total}…",
+  "settings.offlineRemoveAll": "{size} freigeben",
+  "settings.offlineRemoveNothing": "Nichts freizugeben",
+  "settings.offlineRemoving": "Wird entfernt…",
+  "settings.freeUpFailed": "Der Speicherplatz konnte nicht freigegeben werden. Bitte versuche es erneut.",
 
   // Profile menu
   "profile.storage": "Speicher",
@@ -133,8 +180,6 @@ export const de: Record<string, string> = {
   "photos.search": "Suchen",
   "photos.searchPlaceholder": "Nach Dateiname oder Typ suchen…",
   "photos.closeSearch": "Suche schließen",
-  "photos.smaller": "Kleiner",
-  "photos.bigger": "Größer",
   "photos.indexing": "Indexierung {done}/{total}",
   "photos.uploadTitle": "Fotos hochladen oder einen Ordner als Album",
   "photos.uploadingProgress": "Wird hochgeladen {progress}",
@@ -145,7 +190,16 @@ export const de: Record<string, string> = {
   "photos.loadingThumbnails": "Vorschaubilder werden geladen…",
   "photos.dropTitle": "Zum Hochladen ablegen",
   "photos.dropSub": "Ein Ordner wird zu einem Album mit demselben Namen",
-  "photos.offline": "Offline verfügbar",
+  "photos.offline": "Offline verfügbar, verschlüsselt in der App",
+  "photos.downloaded": "In den Ordner Proton Photos heruntergeladen",
+  "photos.renameTitle": "Foto umbenennen",
+  "photos.namePlaceholder": "Dateiname",
+
+  // Tile badges
+  "badge.motionPhoto": "Bewegtes Foto",
+  "badge.panorama": "Panorama",
+  "badge.raw": "RAW",
+  "badge.favorite": "Favorit",
 
   // Search type filters
   "filter.images": "Bilder",
@@ -175,26 +229,125 @@ export const de: Record<string, string> = {
   "albums.untitled": "Unbenanntes Album",
   "albums.empty": "Dieses Album ist leer",
   "albums.none": "Noch keine Alben",
-  "albums.noneSub": "Ziehe einen Ordner auf das Fenster, um eines zu erstellen.",
-  "albums.keepOffline": "Dieses Album auf diesem Gerät behalten",
-  "albums.keptOffline": "Auf diesem Gerät behalten (zum Beenden klicken)",
+  "albums.noneSub": "Erstelle hier eines, oder ziehe einen Ordner auf das Fenster.",
+  "albums.keepDownloaded": "Dieses Album in den Ordner Proton Photos herunterladen",
+  "albums.keptDownloaded": "Wird in den Ordner Proton Photos heruntergeladen (zum Beenden klicken)",
+  "albums.freeUpTitle": "Speicherplatz dieses Albums freigeben?",
+  "albums.freeUpCount.one":
+    "Das Album lädt sich nicht mehr selbst herunter. {count} Foto liegt bereits im Ordner Proton Photos und kann dort bleiben, oder du gibst seinen Speicherplatz frei. Es bleibt in beiden Fällen bei Proton.",
+  "albums.freeUpCount.other":
+    "Das Album lädt sich nicht mehr selbst herunter. {count} Fotos liegen bereits im Ordner Proton Photos und können dort bleiben, oder du gibst ihren Speicherplatz frei. Sie bleiben in beiden Fällen bei Proton.",
+  "albums.freeUpKeep": "Heruntergeladen behalten",
+  "albums.freeUpConfirm": "Freigeben",
+  "albums.newAlbum": "Neues Album",
+  "albums.newTitle": "Album benennen",
+  "albums.namePlaceholder": "Albumname",
+  "albums.create": "Erstellen",
+  "albums.createAndAdd": "Erstellen und hinzufügen",
+  "albums.rename": "Umbenennen",
+  "albums.renameTitle": "Album umbenennen",
+  "albums.share": "Album teilen",
+  "albums.delete": "Album löschen",
+  "albums.deleted": "Album gelöscht",
+  "albums.addTitle": "Zum Album hinzufügen",
+  "albums.addCount.one": "Wähle, wohin {count} Foto soll.",
+  "albums.addCount.other": "Wähle, wohin {count} Fotos sollen.",
+  "albums.added": "{count} hinzugefügt",
+  "albums.addPartial": "{ok} hinzugefügt, {failed} fehlgeschlagen",
+  "albums.removed": "{count} aus dem Album entfernt",
+  "albums.removePartial": "{ok} entfernt, {failed} fehlgeschlagen",
+  "albums.coverSet": "Titelbild aktualisiert",
+  "albums.strandedTitle.one": "{count} Foto ist nur in diesem Album",
+  "albums.strandedTitle.other": "{count} Fotos sind nur in diesem Album",
+  "albums.strandedMsg.one":
+    "Es ist nicht in deiner Zeitleiste und wird mit dem Album gelöscht. Speichere es in deiner Zeitleiste, um es zu behalten.",
+  "albums.strandedMsg.other":
+    "Sie sind nicht in deiner Zeitleiste und werden mit dem Album gelöscht. Speichere sie in deiner Zeitleiste, um sie zu behalten.",
+  "albums.savePhotos": "In Zeitleiste speichern",
+  "albums.deletePhotosToo": "Fotos mitlöschen",
 
   // Shared
   "shared.byMe": "Von mir geteilt",
   "shared.withMe": "Mit mir geteilt",
+  "shared.flip": "Zwischen von mir geteilt und mit mir geteilt wechseln",
   "shared.emptyByTitle": "Du teilst nichts",
   "shared.emptyWithTitle": "Nichts mit dir geteilt",
   "shared.emptyBySub": "Fotos und Alben, die du teilst, erscheinen hier.",
   "shared.emptyWithSub": "Fotos und Alben, die andere mit dir teilen, erscheinen hier.",
   "shared.publicLink": "Über öffentlichen Link geteilt",
   "shared.album": "Album",
+  "shared.manage": "Freigabe verwalten",
+  "shared.back": "Zurück zu Geteilt",
+
+  // Share dialog. A public link's URL carries the secret that decrypts what it
+  // points at, so copying it whole is the whole point of the link section. A
+  // link's password is never read back, so the dialog reports whether one is set
+  // rather than showing it.
+  "share.title": "Teilen",
+  "share.linkTitle": "Öffentlicher Link",
+  "share.linkDesc": "Wer den Link hat, kann dieses Foto öffnen.",
+  "share.createLink": "Link erstellen",
+  "share.copyLink": "Link kopieren",
+  "share.copied": "Kopiert",
+  "share.removeLink": "Link entfernen",
+  "share.passwordLabel": "Passwort",
+  "share.passwordSet": "Zum Öffnen erforderlich",
+  "share.passwordNone": "Nicht gesetzt",
+  "share.passwordPlaceholder": "Neues Passwort",
+  "share.expiryLabel": "Läuft ab",
+  "share.expiryNever": "Nie",
+  "share.expiryPast": "Wähle ein Datum in der Zukunft.",
+  "share.add": "Hinzufügen",
+  "share.change": "Ändern",
+  "share.set": "Festlegen",
+  "share.save": "Speichern",
+  "share.albumInviteOnly":
+    "Alben werden per Einladung geteilt, nicht über einen öffentlichen Link.",
+  "share.peopleTitle": "Personen",
+  "share.emailPlaceholder": "E-Mail-Adresse",
+  "share.invite": "Einladen",
+  "share.roleViewer": "Betrachter",
+  "share.roleEditor": "Bearbeiter",
+  "share.stateInvited": "Eingeladen",
+  "share.stateExternal": "Eingeladen (kein Proton-Konto)",
+  "share.remove": "Entfernen",
+  "share.noPeople": "Noch niemand",
+  "share.stopSharing": "Freigabe beenden",
+  "share.notOwned":
+    "Das wurde mit dir geteilt. Nur wem es gehört, kann ändern, wer darauf zugreifen kann.",
+  "share.badEmail": "Das sieht nicht nach einer E-Mail-Adresse aus.",
+  "share.copyFailed": "Link konnte nicht kopiert werden",
+  "share.failed": "Freigabe konnte nicht geändert werden",
+  "share.working": "Wird ausgeführt…",
+
+  // Trash
+  "trash.emptyTitle": "Der Papierkorb ist leer",
+  "trash.emptySub":
+    "Fotos, die du in den Papierkorb verschiebst, erscheinen hier und lassen sich wiederherstellen.",
+  "trash.emptyAction": "Papierkorb leeren",
+  "trash.moved": "{count} in den Papierkorb verschoben",
+  "trash.movedPartial": "{ok} in den Papierkorb verschoben, {failed} fehlgeschlagen",
+  "trash.restored": "{count} wiederhergestellt",
+  "trash.deleted": "{count} endgültig gelöscht",
+  "trash.emptied": "Papierkorb geleert",
+  "trash.partial": "{ok} erledigt, {failed} fehlgeschlagen",
 
   // Photo viewer / lightbox
   "viewer.details": "Details",
-  "viewer.download": "Offline behalten",
-  "viewer.freeUp": "Speicher freigeben",
+  "viewer.offlineAdd": "Offline-Kopie behalten, verschlüsselt in der App",
+  "viewer.offlineRemove": "Offline-Kopie entfernen",
+  "viewer.download": "In den Ordner Proton Photos herunterladen",
+  "viewer.saveToFolder": "Kopie an einem selbst gewählten Ort speichern",
+  "viewer.freeUp": "Lokale Kopie entfernen und Speicher freigeben",
   "viewer.detailsShortcut": "Details (I)",
+  "viewer.contents": "Inhalt",
+  "viewer.contentsShortcut": "Inhalt (L)",
+  "viewer.filmstrip": "Benachbarte Elemente",
+  "viewer.position": "{n} von {total}",
+  "viewer.favoriteShortcut": "Zu Favoriten hinzufügen (F)",
+  "viewer.unfavoriteShortcut": "Aus Favoriten entfernen (F)",
   "viewer.trashShortcut": "In den Papierkorb (Del)",
+  "viewer.shareShortcut": "Teilen (S)",
   "viewer.rename": "Zum Umbenennen klicken",
   "viewer.closeShortcut": "Schließen (Esc)",
   "viewer.prev": "Vorheriges (←)",
@@ -206,20 +359,61 @@ export const de: Record<string, string> = {
   "viewer.added": "Hinzugefügt",
   "viewer.modified": "Geändert",
   "viewer.size": "Größe",
-  "viewer.onServer": "Auf dem Server",
+  "viewer.onServer": "Belegter Speicher",
   "viewer.albums": "Alben",
   "viewer.shared": "Geteilt",
   "viewer.sharedPublic": "Öffentlicher Link",
   "viewer.sharedPeople": "Mit Personen",
   "viewer.sharedNo": "Nein",
   "viewer.unverified": " (nicht verifiziert)",
-  "viewer.trashFailed": "konnte nicht in den Papierkorb verschoben werden",
+  "viewer.trashFailed": "Dieses Foto konnte nicht in den Papierkorb verschoben werden.",
+  "viewer.favoriteFailed": "Favoriten konnten nicht aktualisiert werden.",
+  "viewer.downloadFailed": "Dieses Foto konnte nicht heruntergeladen werden.",
   "viewer.zoomOut": "Verkleinern",
   "viewer.zoomIn": "Vergrößern",
   "viewer.resetFit": "An Fenster anpassen",
   "viewer.videoLoading": "Video wird geladen…",
-  "viewer.videoError": "Dieses Videoformat kann hier nicht abgespielt werden. Lade es zum Ansehen herunter.",
-  "viewer.videoTooLarge": "Dieses Video ist zu groß, um hier abgespielt zu werden. Lade es zum Ansehen herunter.",
+  "viewer.videoError":
+    "Dieses Videoformat kann hier nicht abgespielt werden. Lade es herunter und sieh es dir in einem anderen Player an.",
+  "viewer.videoTooLarge":
+    "Dieses Video ist zu groß, um hier abgespielt zu werden. Lade es herunter und sieh es dir in einem anderen Player an.",
+
+  // The viewer's own video controls, which stand in for the browser's.
+  "viewer.videoPlay": "Abspielen (Leertaste)",
+  "viewer.videoPause": "Pause (Leertaste)",
+  "viewer.videoStepBack": "Vorheriges Bild",
+  "viewer.videoStepForward": "Nächstes Bild",
+  "viewer.videoSeek": "Wiedergabeposition",
+  "viewer.videoMute": "Stummschalten",
+  "viewer.videoUnmute": "Stummschaltung aufheben",
+
+  // Local file viewer: a file opened from File Explorer, which the app can show
+  // with nobody signed in. Everything both viewers say alike comes from above.
+  "local.camera": "Kamera",
+  "local.created": "Erstellt",
+  "local.path": "Speicherort",
+  "local.upload": "Zu Proton hochladen",
+  "local.uploadUnsupported": "Proton nimmt diesen Dateityp nicht an",
+  "local.uploading": "Wird hochgeladen…",
+  "local.uploaded": "Bei Proton gespeichert",
+  "local.uploadSkipped": "Bereits gespeichert",
+  "local.uploadFailed": "Hochladen fehlgeschlagen. Versuche es erneut.",
+  "local.delete": "Löschen",
+  "local.deleteTitle": "Datei löschen?",
+  "local.deleteMessage": "„{name}“ wird in den Papierkorb verschoben.",
+  "local.notFound": "Diese Datei wurde verschoben oder gelöscht.",
+  "local.unreadable":
+    "Diese Datei konnte nicht gelesen werden. Vielleicht ist sie in einem anderen Programm geöffnet oder für dieses Konto nicht erreichbar.",
+  "local.openFailed": "Diese Datei konnte nicht geöffnet werden.",
+  "local.decodeFailed":
+    "Dieses Foto konnte nicht gelesen werden. Die Datei ist möglicherweise beschädigt oder unvollständig.",
+  "local.videoUnsupported":
+    "Dieses Videoformat kann hier nicht abgespielt werden. Öffne es in einem anderen Player.",
+  "local.noCodec":
+    "Windows hat keinen Decoder für dieses Format, deshalb kann es hier nicht angezeigt werden. Im Microsoft Store gibt es für einige davon das Fehlende: die HEIF- und HEVC-Erweiterungen für HEIC-Fotos und die Raw Image Extension für Rohdateien aus Kameras.",
+  "local.signInTitle": "Zum Hochladen anmelden",
+  "local.signInBody": "Das App-Fenster öffnet sich zum Anmelden. Diese Datei bleibt hier geöffnet.",
+  "local.signInAction": "Anmelden",
 
   // Upload panel
   "upload.title": "Upload",
@@ -246,23 +440,108 @@ export const de: Record<string, string> = {
   "selection.count.one": "{count} Foto ausgewählt",
   "selection.count.other": "{count} Fotos ausgewählt",
   "selection.trash": "Papierkorb",
+  "selection.restore": "Wiederherstellen",
+  "selection.deleteForever": "Endgültig löschen",
+  "selection.more": "Mehr",
   "selection.download": "Herunterladen",
   "selection.freeUp": "Freigeben",
+  "selection.addToAlbum": "Zum Album hinzufügen",
+  "selection.removeFromAlbum": "Aus Album entfernen",
+  "selection.setCover": "Als Titelbild festlegen",
+  "selection.rename": "Umbenennen",
+  "selection.share": "Teilen",
+  "selection.favorite": "Zu Favoriten hinzufügen",
+  "selection.unfavorite": "Aus Favoriten entfernen",
+  "selection.offlineAdd": "Offline verfügbar",
+  "selection.offlineRemove": "Offline-Kopie entfernen",
+  // Download: the copy that lands in the Proton Photos folder, where Windows and any
+  // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} freigegeben",
+  "download.freedUpNone": "Es wurde nichts freigegeben",
   "download.notDownloaded": "Keine heruntergeladenen Dateien zum Freigeben",
   "download.running": "Wird heruntergeladen…",
-  "download.done": "{count} offline behalten",
-  "download.alreadyOffline": "Bereits offline verfügbar",
+  "download.progress": "Wird heruntergeladen {done}/{total}…",
+  "download.done": "{count} in den Ordner Proton Photos heruntergeladen",
+  "download.donePartial": "{ok} von {total} heruntergeladen",
+  "download.doneNone":
+    "Es wurde nichts heruntergeladen. Der Ordner Proton Photos ist möglicherweise noch nicht bereit.",
+  "download.alreadyDownloaded": "Bereits heruntergeladen",
+  "download.saved": "{count} im Ordner gespeichert",
   "download.partial": "{ok} gespeichert, {failed} fehlgeschlagen",
+
+  // Available offline: the app's own encrypted copy, which is not the Proton Photos
+  // folder. These say where the copy went, so the two are never mistaken for one another.
+  "offline.added.one": "{count} Foto wird für die Offline-Nutzung gespeichert",
+  "offline.added.other": "{count} Fotos werden für die Offline-Nutzung gespeichert",
+  "offline.removed.one": "{count} Offline-Kopie entfernt",
+  "offline.removed.other": "{count} Offline-Kopien entfernt",
+  "offline.alreadyOffline": "Bereits offline verfügbar",
+  "offline.noneOffline": "Keine Offline-Kopien zum Entfernen",
+  "offline.failed": "konnte nicht für die Offline-Nutzung gespeichert werden",
 
   // Trash confirmation
   "confirm.trashTitle": "In den Papierkorb verschieben?",
   "confirm.trashConfirm": "In den Papierkorb verschieben",
   "confirm.trashCount.one":
-    "{count} Foto wird in den Papierkorb verschoben. Du kannst es aus Proton Drive wiederherstellen.",
+    "{count} Foto wird in den Papierkorb verschoben. Du kannst es im Tab Papierkorb wiederherstellen.",
   "confirm.trashCount.other":
-    "{count} Fotos werden in den Papierkorb verschoben. Du kannst sie aus Proton Drive wiederherstellen.",
+    "{count} Fotos werden in den Papierkorb verschoben. Du kannst sie im Tab Papierkorb wiederherstellen.",
   "confirm.trashName":
-    '"{name}" wird in den Papierkorb verschoben. Du kannst es aus Proton Drive wiederherstellen.',
+    '"{name}" wird in den Papierkorb verschoben. Du kannst es im Tab Papierkorb wiederherstellen.',
   "confirm.thisPhoto": "Dieses Foto",
+
+  // Remove from album. The photos stay in Photos; only the album loses them.
+  "confirm.removeTitle": "Aus dem Album entfernen?",
+  "confirm.removeConfirm": "Entfernen",
+  "confirm.removeCount.one":
+    "{count} Foto wird aus diesem Album genommen und bleibt in deiner Zeitleiste erhalten.",
+  "confirm.removeCount.other":
+    "{count} Fotos werden aus diesem Album genommen und bleiben in deiner Zeitleiste erhalten.",
+
+  // Delete-forever confirmation. Nothing in the app or at Proton undoes these.
+  "confirm.deleteTitle": "Endgültig löschen?",
+  "confirm.deleteConfirm": "Endgültig löschen",
+  "confirm.deleteCount.one":
+    "{count} Foto wird endgültig von Proton gelöscht. Das lässt sich nicht rückgängig machen.",
+  "confirm.deleteCount.other":
+    "{count} Fotos werden endgültig von Proton gelöscht. Das lässt sich nicht rückgängig machen.",
+  "confirm.emptyTitle": "Papierkorb leeren?",
+  "confirm.emptyConfirm": "Alles löschen",
+  "confirm.emptyMessage":
+    "Alles im Papierkorb wird endgültig von Proton gelöscht. Das lässt sich nicht rückgängig machen.",
+
+  // Deleting an album skips the trash, so the album is gone for good even though
+  // the photos in your timeline are not.
+  "confirm.deleteAlbumTitle": "Dieses Album löschen?",
+  "confirm.deleteAlbumMessage":
+    "Das Album wird gelöscht und lässt sich nicht wiederherstellen. Fotos in deiner Zeitleiste bleiben erhalten.",
+
+  // Revoking sharing takes access away from people who may already hold the link,
+  // and nothing is deleted by it, so both of these say exactly what is lost.
+  "confirm.removeLinkTitle": "Link entfernen?",
+  "confirm.removeLinkMessage":
+    "Der Link funktioniert für alle nicht mehr, die ihn haben. Per E-Mail eingeladene Personen behalten ihren Zugriff.",
+  "confirm.removeLinkConfirm": "Link entfernen",
+  "confirm.replaceLinkTitle": "Link ersetzen?",
+  "confirm.replaceLinkMessage":
+    "Dieser Link ist zu alt, um geändert zu werden. Beim Speichern wird er durch einen neuen unter einer anderen Adresse ersetzt. Der alte Link funktioniert für alle nicht mehr, die ihn haben, und sein Passwort wird entfernt. Der neue Link landet in deiner Zwischenablage.",
+  "confirm.replaceLinkConfirm": "Link ersetzen",
+  "confirm.stopSharingTitle": "Freigabe beenden?",
+  "confirm.stopSharingMessage":
+    "Der Link funktioniert nicht mehr und alle Eingeladenen verlieren ihren Zugriff. Es wird nichts gelöscht.",
+  "confirm.stopSharingConfirm": "Freigabe beenden",
+
+  // Freeing up drops the downloaded copies only. Nothing leaves Proton, so this asks
+  // before a big change without treating it as one there is no way back from.
+  "confirm.freeUpAllTitle": "Alle heruntergeladenen Fotos freigeben?",
+  "confirm.freeUpAllMessage":
+    "Die {size} im Ordner Proton Photos werden entfernt. Deine Fotos bleiben bei Proton und werden wieder heruntergeladen, sobald du sie öffnest.",
+  "confirm.freeUpAllConfirm": "Freigeben",
+
+  // Removing every offline copy. The photos themselves are untouched, so this warns
+  // about the download they will need next time and nothing more.
+  "confirm.removeOfflineAllTitle": "Alle Offline-Kopien entfernen?",
+  "confirm.removeOfflineAllMessage":
+    "Die {size}, die verschlüsselt in der App gespeichert sind, werden entfernt. Deine Fotos bleiben bei Proton, und zum erneuten Öffnen wird eine Verbindung benötigt.",
+  "confirm.removeOfflineAllConfirm": "Entfernen",
 };

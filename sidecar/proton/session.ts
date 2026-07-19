@@ -24,91 +24,128 @@
 // client. Holds state across the login -> 2FA -> browse steps.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { randomUUID } from "node:crypto";
-import { createWriteStream, existsSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { WritableStream } from "node:stream/web";
 
-import { MemoryCache, ThumbnailType } from "@protontech/drive-sdk";
+import { MemoryCache, PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
 import { ProtonDrivePhotosClient } from "@protontech/drive-sdk/dist/protonDrivePhotosClient.js";
 
-import { CryptoProxy, initCrypto, makeOpenPGPCryptoModule, srpModule, getSrp } from "./crypto.ts";
+import {
+  CryptoProxy,
+  computeKeyPassword,
+  initCrypto,
+  makeOpenPGPCryptoModule,
+  makeSrpModule,
+  getSrp,
+} from "./crypto.ts";
 import {
   ProtonApi,
   captchaUrl,
   makeSdkHttpClient,
+  randomModulus,
   refreshSession,
   type HvProof,
   type Session,
 } from "./api.ts";
 import {
+  SESSION_FILE,
   isReady,
   metaGet,
   metaPut,
-  seal,
+  readSealedOrDiscard,
   storeDir,
   thumbGet,
   thumbPut,
-  unseal,
   wipeCache,
+  writeSealedAtomic,
 } from "./store.ts";
 import { lockVault, openOrResetVault, unlockVault, vaultExists } from "./vault.ts";
+import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
+import {
+  getOriginal as readOriginal,
+  getSaveStatus as readSaveStatus,
+  getVideo as readVideo,
+  hydrateFile as runHydrateFile,
+  listForMount as readMountPage,
+  readOriginalBytes as takeOriginalBytes,
+  releaseOriginal as dropOriginal,
+  resetDownloadState,
+  resolveDurationsBatch,
+  resolveMediaTypesBatch,
+  startSaveOriginals as runSaveOriginals,
+  type HydratedFile,
+  type MountPage,
+  type OriginalStatus,
+  type SaveStatus,
+  type VideoBytes,
+} from "./download.ts";
+import {
+  offlineStatus as readOfflineStatus,
+  pinOffline as runPinOffline,
+  resetOfflineState,
+  unpinAllOffline as runUnpinAllOffline,
+  unpinOffline as runUnpinOffline,
+  type OfflineStatus,
+} from "./offline.ts";
 import {
   cancelUpload as abortUpload,
   clearFinishedUploads as clearUploads,
   getUploadStatus as readUploadStatus,
   startUpload as runUpload,
+  type ShellMediaInfo,
   type UploadStatus,
 } from "./upload.ts";
+import {
+  deletePhotosForever as runDeleteForever,
+  emptyTrash as runEmptyTrash,
+  listTrashed as readTrash,
+  restorePhotos as runRestore,
+  type TrashItem,
+  type TrashResult,
+} from "./trash.ts";
+import {
+  getSharingInfo as readSharingInfo,
+  invitePeople as runInvitePeople,
+  removePerson as runRemovePerson,
+  removePublicLink as runRemovePublicLink,
+  setPublicLink as runSetPublicLink,
+  stopSharing as runStopSharing,
+  type PublicLinkOptions,
+  type SharingInfo,
+} from "./sharing.ts";
+import {
+  addPhotosToAlbum as runAddToAlbum,
+  createAlbum as runCreateAlbum,
+  deleteAlbum as runDeleteAlbum,
+  listAlbumPhotoUids as readAlbumPhotoUids,
+  listAlbumPhotos as readAlbumPhotos,
+  listAlbums as readAlbums,
+  listAlbumsForMount as readAlbumsForMount,
+  removePhotosFromAlbum as runRemoveFromAlbum,
+  renameAlbum as runRenameAlbum,
+  setAlbumCover as runSetAlbumCover,
+  type AlbumMount,
+  type AlbumPhoto,
+  type AlbumResult,
+  type AlbumSummary,
+  type DeleteAlbumOutcome,
+} from "./albums.ts";
 
-// The signed-in Proton session, encrypted at rest with the vault key. Only a
-// correct password can derive that key, so this file is unreadable without it.
-const SESSION_FILE = "session.enc";
+// The signed-in Proton session is sealed with the vault key, so it is named by the
+// store: `wipeCache` has to take it along when that key changes.
+//
 // The vault verifier/salt file (must match vault.ts META_FILE). Removed on
 // sign-out so the account is fully forgotten.
 const VAULT_META_FILE = "vault.json";
-
-// Cap for in-memory video playback. A larger file would strain the sidecar heap
-// and the JSON-RPC channel, so past it the app offers a download instead.
-const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
-
-/** A destination filename in `dir` that does not overwrite an existing file. */
-function uniqueFileName(dir: string, name: string): string {
-  if (!existsSync(join(dir, name))) return name;
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const ext = dot > 0 ? name.slice(dot) : "";
-  for (let i = 2; i < 10000; i++) {
-    const candidate = `${stem} (${i})${ext}`;
-    if (!existsSync(join(dir, candidate))) return candidate;
-  }
-  return `${stem}-${Date.now()}${ext}`;
-}
+// Mount state the Rust host keeps in this same directory (names must match
+// cloud_mount.rs). Sealed there under the host's own key, but still per-account,
+// so sign-out takes it with the rest: left behind, one account's uid list makes
+// every photo in the next one look new, which is a whole-library download.
+const HOST_STATE_FILES = ["mount_seen.txt", "synced_albums.txt"];
+// What an internal-only key lookup answers for an address with no Proton account.
+const NO_SUCH_PROTON_ADDRESS = 33102;
 
 const toDataUrl = (bytes: Buffer): string => `data:image/jpeg;base64,${bytes.toString("base64")}`;
-
-const toMillis = (value: unknown): number => (value ? new Date(value as string).getTime() : 0);
-
-/**
- * `NodeEntity.name` is a `Result<string, Error | InvalidNameError>`. An invalid
- * name still carries a placeholder the client is meant to display.
- */
-function nodeName(node: any): string {
-  const result = node?.name;
-  if (!result) return "";
-  if (result.ok) return String(result.value);
-  const placeholder = result.error?.name;
-  return typeof placeholder === "string" ? placeholder : "";
-}
-
-type AlbumSummary = {
-  uid: string;
-  name: string;
-  photoCount: number;
-  coverUid: string | null;
-  lastActivityTime: number;
-};
 
 type SharedSummary = {
   uid: string;
@@ -118,9 +155,20 @@ type SharedSummary = {
   isShared: boolean;
   isSharedPublicly: boolean;
   captureTime: number | null;
+  /**
+   * The album fields, null on a photo. A shared album is an album first and a
+   * shared thing second, so it gets the same three facts the albums screen shows:
+   * without them it can only be drawn as a bare tile.
+   *
+   * The cover uid is stamped with the owner's volume, not the reader's, which is
+   * what makes it resolvable at all from here.
+   */
+  coverUid: string | null;
+  photoCount: number | null;
+  lastActivityTime: number | null;
 };
 
-type NodeMeta = { uid: string; name: string; mediaType: string | null };
+type NodeMeta = { uid: string; name: string; mediaType: string | null; size?: number | null };
 
 type LoginResult =
   | { status: "ok"; email: string }
@@ -302,12 +350,26 @@ export class ProtonSession {
     if (!unlockVault(password)) return { status: "error", error: "wrong password" };
 
     try {
+      // A blob that will not open is no more recoverable than one that is not there, so
+      // it is answered the same way: the password has just been proved correct, and this
+      // must not look like a wrong one. `readSealedOrDiscard` drops it, leaving the vault
+      // and every cached photo intact and asking only for a sign-in. Surfacing the crypto
+      // error instead fails identically on every retry, and the one way out of that is
+      // the one that wipes every original the user pinned.
       const path = join(storeDir(), SESSION_FILE);
-      if (!existsSync(path)) {
+      const raw = readSealedOrDiscard(path);
+      let blob: PersistableSession | null = null;
+      if (raw) {
+        try {
+          blob = JSON.parse(raw.toString("utf8")) as PersistableSession;
+        } catch {
+          rmSync(path, { force: true }); // opened, but is not the shape we wrote
+        }
+      }
+      if (!blob) {
         lockVault();
         return { status: "error", error: "No saved session" };
       }
-      const blob = JSON.parse(unseal(readFileSync(path)).toString("utf8")) as PersistableSession;
       let result = await this.resumeSession(blob, password);
       if (result.status !== "ok") {
         // The stored tokens are dead (e.g. the refresh token expired), but the
@@ -338,6 +400,14 @@ export class ProtonSession {
     this.email = "";
     this.password = "";
     this.userKeyPassphrases = {};
+    // The mount listing is this account's photo uids and capture times. Drop it
+    // with everything else: leaving it would let a listing for the NEXT account
+    // be served from the previous one's snapshot.
+    resetDownloadState();
+    // Same for the offline list: it is sealed with the key we just forgot, so the
+    // in-memory copy must go too. The stored originals stay for this account to
+    // come back to; sign-out is what removes those, through wipeCache.
+    resetOfflineState();
     return { ok: true };
   }
 
@@ -347,8 +417,19 @@ export class ProtonSession {
     try {
       rmSync(join(storeDir(), SESSION_FILE), { force: true });
       rmSync(join(storeDir(), VAULT_META_FILE), { force: true });
+      // The host's mount state lives in this same directory and is plaintext:
+      // the auto-download baseline is a list of this account's photo uids, and
+      // the album list is what it chose to keep offline. Neither survives the
+      // account it belongs to.
+      for (const f of HOST_STATE_FILES) {
+        rmSync(join(storeDir(), f), { force: true });
+      }
     } catch (e) {
-      process.stderr.write(`[sidecar] signOut cleanup failed: ${(e as Error).message}\n`);
+      // Code only: a Node fs error message embeds the full path, and these paths
+      // carry the Windows account name.
+      process.stderr.write(
+        `[sidecar] signOut cleanup failed: ${(e as NodeJS.ErrnoException).code ?? "unknown"}\n`,
+      );
     }
     wipeCache();
     return { ok: true };
@@ -364,15 +445,15 @@ export class ProtonSession {
     const blob = this.getPersistable();
     if (!blob) return;
     try {
-      writeFileSync(join(storeDir(), SESSION_FILE), seal(Buffer.from(JSON.stringify(blob))));
+      // Written aside and renamed rather than in place: this runs on every token
+      // refresh, so a write torn by a crash would leave an unreadable session behind
+      // on an ordinary day of use.
+      writeSealedAtomic(join(storeDir(), SESSION_FILE), Buffer.from(JSON.stringify(blob)));
     } catch (e) {
-      process.stderr.write(`[sidecar] could not persist session: ${(e as Error).message}\n`);
+      process.stderr.write(
+        `[sidecar] could not persist session: ${(e as NodeJS.ErrnoException).code ?? "unknown"}\n`,
+      );
     }
-  }
-
-  /** Restore a stored session (refreshes the token, then rebuilds the client). */
-  async resume(blob: PersistableSession): Promise<LoginResult> {
-    return this.resumeSession(blob, "");
   }
 
   /**
@@ -395,11 +476,13 @@ export class ProtonSession {
   }
 
   /**
-   * The blob the host persists into the encrypted app store. It carries the
+   * The blob `persistSession` seals into the encrypted app store. It carries the
    * derived key passphrases, mirroring the SDK's own session-secret cache. The
-   * account password itself is never written anywhere.
+   * account password itself is never written anywhere. Private on purpose: these
+   * are the tokens and the passphrases that unlock the Proton private keys, so
+   * they must never be reachable over the RPC channel.
    */
-  getPersistable(): PersistableSession | null {
+  private getPersistable(): PersistableSession | null {
     if (!this.session) return null;
     return {
       uid: this.session.uid,
@@ -422,7 +505,12 @@ export class ProtonSession {
         cryptoCache: new MemoryCache(),
         account,
         openPGPCryptoModule: makeOpenPGPCryptoModule(),
-        srpModule,
+        // Read per call, so a token refresh (which rewrites the session in
+        // place) is picked up without rebuilding the client.
+        srpModule: makeSrpModule(async () => {
+          if (!this.session) throw new Error("Not signed in");
+          return randomModulus(this.session);
+        }),
         // Silent telemetry. The SDK otherwise logs every API path and node UID
         // through `getLogger`, and could hand metrics (which carry node UIDs) to
         // `recordMetric`. No-ops keep all of that off disk and off the network.
@@ -468,7 +556,7 @@ export class ProtonSession {
       if (!passphrase) {
         const salt = saltById.get(uk.ID);
         if (!salt || !password) continue;
-        passphrase = await srpModule.computeKeyPassword(password, salt);
+        passphrase = await computeKeyPassword(password, salt);
       }
       try {
         userKeys.push(await CryptoProxy.importPrivateKey({ armoredKey: uk.PrivateKey, passphrase } as any));
@@ -501,7 +589,7 @@ export class ProtonSession {
             passphrase = dec.data;
           } else {
             const salt = saltById.get(ak.ID);
-            passphrase = salt ? await srpModule.computeKeyPassword(password, salt) : password;
+            passphrase = salt ? await computeKeyPassword(password, salt) : password;
           }
           const key = await CryptoProxy.importPrivateKey({ armoredKey: ak.PrivateKey, passphrase } as any);
           keys.push({ id: ak.ID, key });
@@ -522,6 +610,9 @@ export class ProtonSession {
     const publicKeyCache = new Map<string, any[]>();
 
     const fetchPublicKeys = async (email: string): Promise<any[]> => {
+      // `InternalOnly=1` keeps the lookup inside Proton's own directory, which is
+      // what makes an empty answer mean "no Proton account" rather than "no keys
+      // published anywhere".
       const res: any = await ProtonApi.getAddressPublicKeys(s, email);
       const armored = [...(res?.Address?.Keys ?? []), ...(res?.CatchAll?.Keys ?? [])]
         .map((k: any) => k?.PublicKey)
@@ -529,6 +620,34 @@ export class ProtonSession {
       return Promise.all(
         armored.map((armoredKey) => CryptoProxy.importPublicKey({ armoredKey } as any)),
       );
+    };
+
+    /**
+     * An address's Proton keys, cached for the session. Two callers depend on it:
+     * signature verification, where a lookup failure degrades to "cannot verify"
+     * rather than blocking a photo from rendering, and `hasProtonAccount`, where
+     * an empty list is the answer itself.
+     */
+    const getPublicKeys = async (email: string, forceRefresh = false): Promise<any[]> => {
+      const key = email.toLowerCase();
+      if (!forceRefresh && publicKeyCache.has(key)) return publicKeyCache.get(key)!;
+      try {
+        const keys = await fetchPublicKeys(email);
+        publicKeyCache.set(key, keys);
+        return keys;
+      } catch (e) {
+        // An address with no Proton account answers 33102, which is an answer and
+        // not a fault, so it is not worth a line. Anything else is, but only its
+        // status: the API's wording quotes the address, and that never goes to
+        // the log.
+        const err = e as { status?: number; code?: number };
+        if (err.code !== NO_SUCH_PROTON_ADDRESS) {
+          process.stderr.write(
+            `[sidecar] getPublicKeys failed (status ${err.status ?? "?"}, code ${err.code ?? "?"})\n`,
+          );
+        }
+        return [];
+      }
     };
 
     // The ProtonDriveAccount contract the SDK consumes.
@@ -540,24 +659,15 @@ export class ProtonSession {
         if (!a) throw new Error(`No address for ${emailOrId}`);
         return a;
       },
-      hasProtonAccount: async () => true,
       /**
-       * Verification keys for an address. A lookup failure degrades to "cannot
-       * verify" rather than blocking a photo from rendering, which is how the
-       * SDK already treats signature verification: best-effort, non-fatal.
+       * Whether an address can be invited as a Proton user. The SDK asks before
+       * sharing and sends one of two invitations on the answer: an encrypted one
+       * to a Proton account's keys, or a signed external one to an address
+       * without them. Answering a blanket "yes" would send every non-Proton
+       * invitee down the encrypted path, which has no key to encrypt to.
        */
-      getPublicKeys: async (email: string, forceRefresh = false): Promise<any[]> => {
-        const key = email.toLowerCase();
-        if (!forceRefresh && publicKeyCache.has(key)) return publicKeyCache.get(key)!;
-        try {
-          const keys = await fetchPublicKeys(email);
-          publicKeyCache.set(key, keys);
-          return keys;
-        } catch (e) {
-          process.stderr.write(`[sidecar] getPublicKeys failed: ${(e as Error).message}\n`);
-          return [];
-        }
-      },
+      hasProtonAccount: async (email: string) => (await getPublicKeys(email)).length > 0,
+      getPublicKeys: (email: string, forceRefresh = false) => getPublicKeys(email, forceRefresh),
     };
   }
 
@@ -644,271 +754,133 @@ export class ProtonSession {
     return null;
   }
 
-  // ---- Full-file download: in-memory video playback, and save-to-folder ----
+  // ---- Download ----
 
-  /**
-   * Full video bytes for in-app playback, kept in memory and returned as base64
-   * so nothing decrypted is written to disk. Bounded by a size cap: a very large
-   * file would strain the sidecar heap and the JSON-RPC channel, so past the cap
-   * the caller is told to download the file instead.
-   */
-  async getVideo(uid: string): Promise<{ base64: string; mime: string }> {
+  async getVideo(uid: string): Promise<VideoBytes> {
     if (!this.photos) throw new Error("Not signed in");
-    const node = await this.photos.getNode(uid);
-    const mime = (node as any).mediaType || "video/mp4";
-    const downloader = await this.photos.getFileDownloader(uid);
-    const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-    if (claimed && claimed > MAX_INMEMORY_VIDEO) throw new Error("VIDEO_TOO_LARGE");
-
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    const stream = new WritableStream<Uint8Array>({
-      write(chunk) {
-        total += chunk.byteLength;
-        if (total > MAX_INMEMORY_VIDEO) throw new Error("VIDEO_TOO_LARGE");
-        chunks.push(chunk);
-      },
-    });
-    await downloader.downloadToStream(stream as any).completion();
-    return { base64: Buffer.concat(chunks).toString("base64"), mime };
+    return readVideo(this.photos, uid);
   }
 
-  private mountUids: { uid: string; captureTime: number }[] | null = null;
-
-  /**
-   * One page of cloud photos as {uid, name, size, captureTime} for the Explorer
-   * mount. `offset === 0` (re)builds the lightweight uid list once (a single cheap
-   * timeline pass); later pages slice it. The claimed size (needed so hydration
-   * transfers exactly that many bytes) lives on the node revision, so `getNode` is
-   * per photo — paging lets the Rust host release the RPC lock between pages, so
-   * the app's thumbnails keep loading while the mount populates.
-   */
-  async listForMount(
-    offset: number,
-    limit: number,
-  ): Promise<{
-    items: { uid: string; name: string; size: number; captureTime: number }[];
-    total: number;
-  }> {
+  /** Kicks the save off and returns at once; the UI polls `saveStatus`. */
+  startSaveOriginals(uids: string[], destDir: string): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    if (offset === 0 || !this.mountUids) {
-      const picks: { uid: string; captureTime: number }[] = [];
-      for await (const item of this.photos.iterateTimeline()) {
-        const uid = (item as any).nodeUid ?? (item as any).uid;
-        if (!uid) continue;
-        const ct = (item as any).captureTime;
-        picks.push({ uid, captureTime: ct instanceof Date ? ct.getTime() : Number(ct) * 1000 });
-      }
-      this.mountUids = picks;
-    }
+    runSaveOriginals(this.photos, uids, destDir);
+    return { started: true };
+  }
 
-    const items: { uid: string; name: string; size: number; captureTime: number }[] = [];
-    for (const p of this.mountUids.slice(offset, offset + limit)) {
-      try {
-        const n: any = await this.photos.getNode(p.uid);
-        const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
-        const size = Number(revision?.claimedSize ?? 0);
-        if (size > 0) {
-          items.push({ uid: p.uid, name: nodeName(n) || p.uid, size, captureTime: p.captureTime });
-        }
-      } catch {
-        /* a node that vanished server-side is skipped */
-      }
-    }
-    return { items, total: this.mountUids.length };
+  saveStatus(): SaveStatus {
+    return readSaveStatus();
+  }
+
+  async listForMount(offset: number, limit: number): Promise<MountPage> {
+    if (!this.photos) throw new Error("Not signed in");
+    return readMountPage(this.photos, offset, limit);
+  }
+
+  async hydrateFile(uid: string): Promise<HydratedFile> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runHydrateFile(this.photos, uid);
   }
 
   /**
-   * Stream one file's decrypted bytes to a temp file on disk and return its path,
-   * for the host to transfer into the Explorer placeholder in small chunks. The full
-   * file is never resident in memory: buffering it (plus a base64 copy for the RPC)
-   * needed several times the file size at once, so a run of large videos starved the
-   * single-threaded sidecar and stalled the whole app. Streaming keeps memory flat,
-   * so there is also no size cap. The host deletes the temp file after the transfer.
+   * The viewer's full-resolution upgrade: starts the transfer on the first call for a
+   * photo and reports it on every later one, so the viewer polls this single method.
    */
-  async hydrateFile(uid: string): Promise<{ path: string; size: number }> {
+  async getOriginal(uid: string): Promise<OriginalStatus> {
     if (!this.photos) throw new Error("Not signed in");
-    const dest = join(tmpdir(), `pfp-hyd-${randomUUID()}.bin`);
-    const downloader = await this.photos.getFileDownloader(uid);
-    const file = createWriteStream(dest);
-    let total = 0;
-    const stream = new WritableStream<Uint8Array>({
-      write(chunk) {
-        total += chunk.byteLength;
-        // Respect backpressure so a large file cannot balloon the write buffer.
-        if (!file.write(chunk)) {
-          return new Promise<void>((resolve) => file.once("drain", resolve));
-        }
-      },
-      abort() {
-        file.destroy();
-      },
-    });
-    try {
-      await downloader.downloadToStream(stream as any).completion();
-      // Close ourselves and wait for the flush; end(cb) cannot hang the way waiting
-      // on the SDK to call the stream's close() could (which froze the serial RPC).
-      await new Promise<void>((resolve, reject) => {
-        file.end((err?: Error | null) => (err ? reject(err) : resolve()));
-      });
-    } catch (e) {
-      file.destroy();
-      try {
-        rmSync(dest, { force: true });
-      } catch {
-        /* a cleanup failure must not mask the original error */
-      }
-      throw e;
-    }
-    return { path: dest, size: total };
+    return readOriginal(this.photos, uid);
+  }
+
+  /** Drop the staged original once the viewer steps away from it or closes. */
+  releaseOriginal(uid?: string): { released: true } {
+    dropOriginal(uid);
+    return { released: true };
   }
 
   /**
-   * Download the originals for the given photos straight to a folder the user
-   * picked. The decrypted files are written out and the app does not track them
-   * afterwards. Per-file result; the run continues past a single failure, and a
-   * partial file from a failed download is removed.
+   * The bytes behind an in-memory original, for the host to serve. Nothing but the
+   * host's own protocol handler calls this, and only for the token it was just given.
    */
-  async downloadOriginals(
-    uids: string[],
-    destDir: string,
-  ): Promise<{ uid: string; ok: boolean; name?: string; error?: string }[]> {
-    if (!this.photos) throw new Error("Not signed in");
-    const out: { uid: string; ok: boolean; name?: string; error?: string }[] = [];
-    for (const uid of uids) {
-      let dest: string | null = null;
-      try {
-        const node = await this.photos.getNode(uid);
-        const name = uniqueFileName(destDir, nodeName(node) || uid);
-        dest = join(destDir, name);
-        const downloader = await this.photos.getFileDownloader(uid);
-        const file = createWriteStream(dest);
-        const stream = new WritableStream<Uint8Array>({
-          write(chunk) {
-            // Synchronous write like the video path; respect backpressure so a large
-            // file does not balloon the buffer.
-            if (!file.write(chunk)) {
-              return new Promise<void>((resolve) => file.once("drain", resolve));
-            }
-          },
-          abort() {
-            file.destroy();
-          },
-        });
-        await downloader.downloadToStream(stream as any).completion();
-        // Close the file ourselves and wait for the flush. Waiting on the SDK to
-        // call the stream's close() (as the old code did via finished()) could hang
-        // forever and, since RPC is serialized, froze the whole app; end(cb) cannot.
-        await new Promise<void>((resolve, reject) => {
-          file.end((err?: Error | null) => (err ? reject(err) : resolve()));
-        });
-        // Stamp the file with the photo's original capture time so Explorer shows
-        // the real date, not the moment it was downloaded.
-        const whenMs =
-          toMillis((node as any).photo?.captureTime) || toMillis((node as any).creationTime);
-        if (whenMs > 0) {
-          try {
-            utimesSync(dest, new Date(whenMs), new Date(whenMs));
-          } catch {
-            /* a timestamp failure must not fail the download */
-          }
-        }
-        out.push({ uid, ok: true, name });
-      } catch (e) {
-        if (dest) {
-          try {
-            rmSync(dest, { force: true });
-          } catch {
-            /* ignore */
-          }
-        }
-        out.push({ uid, ok: false, error: (e as Error).message });
-      }
-    }
-    return out;
+  readOriginalBytes(token: string): { base64: string; mime: string } | null {
+    return takeOriginalBytes(token);
   }
 
-  // ---- Albums (entirely SDK-backed: iterateAlbums / iterateAlbum) ----
+  // ---- Available offline (see offline.ts) ----
 
-  /** Albums, most recently active first. The SDK yields them as nodes of type "album". */
+  /** Mark photos as available offline; the fetch runs in the background. */
+  pinOffline(uids: string[]): OfflineStatus {
+    if (!this.photos) throw new Error("Not signed in");
+    return runPinOffline(this.photos, uids);
+  }
+
+  /** Unmark photos and reclaim the space their originals held. */
+  unpinOffline(uids: string[]): OfflineStatus {
+    return runUnpinOffline(uids);
+  }
+
+  /** The Settings panel's "free up" for offline photos: all of them at once. */
+  unpinAllOffline(): OfflineStatus {
+    return runUnpinAllOffline();
+  }
+
+  /** What is pinned, how much of it has landed, and what it costs. */
+  offlineStatus(): OfflineStatus {
+    return readOfflineStatus();
+  }
+
+  // ---- Albums (see albums.ts) ----
+
   async getAlbums(): Promise<AlbumSummary[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const out: AlbumSummary[] = [];
-    for await (const node of this.photos.iterateAlbums()) {
-      const album = (node as any).album;
-      out.push({
-        uid: (node as any).uid,
-        name: nodeName(node),
-        photoCount: album?.photoCount ?? 0,
-        coverUid: album?.coverPhotoNodeUid ?? null,
-        lastActivityTime: toMillis(album?.lastActivityTime),
-      });
-    }
-    out.sort((a, b) => b.lastActivityTime - a.lastActivityTime);
-    return out;
+    return readAlbums(this.photos);
   }
 
-  /**
-   * Every photo uid that belongs to at least one album.
-   *
-   * Android keeps a join table for this because a photo's parent is the photos
-   * root, not the album. The SDK gives us the same edges through `iterateAlbum`,
-   * so we walk the albums once and collect the membership.
-   */
   async getAlbumPhotoUids(): Promise<string[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const albumUids: string[] = [];
-    for await (const album of this.photos.iterateAlbums()) {
-      albumUids.push((album as any).uid);
-    }
-
-    const members = new Set<string>();
-    for (const albumUid of albumUids) {
-      try {
-        for await (const item of this.photos.iterateAlbum(albumUid)) {
-          members.add((item as any).nodeUid);
-        }
-      } catch (e) {
-        process.stderr.write(`[sidecar] iterateAlbum(${albumUid}) failed: ${(e as Error).message}\n`);
-      }
-    }
-    return [...members];
+    return readAlbumPhotoUids(this.photos);
   }
 
-  /** The photos inside one album, newest first. */
-  async getAlbumPhotos(uid: string): Promise<{ uid: string; captureTime: number }[]> {
+  async getAlbumPhotos(uid: string): Promise<AlbumPhoto[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const out: { uid: string; captureTime: number }[] = [];
-    for await (const item of this.photos.iterateAlbum(uid)) {
-      out.push({ uid: (item as any).nodeUid, captureTime: toMillis((item as any).captureTime) });
-    }
-    out.sort((a, b) => b.captureTime - a.captureTime);
-    return out;
+    return readAlbumPhotos(this.photos, uid);
   }
 
-  /**
-   * Albums with their member photo uids, for the Explorer mount's `Albums\`
-   * subfolders. Names and sizes are not resolved here — the mount reuses the
-   * metadata gathered in the main photo pass — so this stays a cheap membership
-   * walk (iterateAlbums, then iterateAlbum per album).
-   */
-  async listAlbumsForMount(): Promise<{ uid: string; name: string; uids: string[] }[]> {
+  async listAlbumsForMount(): Promise<AlbumMount[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const out: { uid: string; name: string; uids: string[] }[] = [];
-    for await (const albumNode of this.photos.iterateAlbums()) {
-      const albumUid = (albumNode as any).uid;
-      const uids: string[] = [];
-      try {
-        for await (const item of this.photos.iterateAlbum(albumUid)) {
-          const u = (item as any).nodeUid;
-          if (u) uids.push(u);
-        }
-      } catch (e) {
-        process.stderr.write(`[sidecar] iterateAlbum(${albumUid}) failed: ${(e as Error).message}\n`);
-      }
-      out.push({ uid: albumUid, name: nodeName(albumNode) || "Album", uids });
-    }
-    return out;
+    return readAlbumsForMount(this.photos);
+  }
+
+  async createAlbum(name: string): Promise<AlbumSummary> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runCreateAlbum(this.photos, name);
+  }
+
+  async renameAlbum(uid: string, name: string): Promise<{ uid: string; name: string }> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runRenameAlbum(this.photos, uid, name);
+  }
+
+  async setAlbumCover(uid: string, coverUid: string): Promise<{ uid: string; coverUid: string }> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runSetAlbumCover(this.photos, uid, coverUid);
+  }
+
+  async deleteAlbum(
+    uid: string,
+    options: { force?: boolean; saveToTimeline?: boolean },
+  ): Promise<DeleteAlbumOutcome> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runDeleteAlbum(this.photos, uid, options);
+  }
+
+  async addPhotosToAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runAddToAlbum(this.photos, albumUid, uids);
+  }
+
+  async removePhotosFromAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runRemoveFromAlbum(this.photos, albumUid, uids);
   }
 
   // ---- Sharing (SDK: iterateSharedNodes / iterateSharedNodesWithMe) ----
@@ -931,9 +903,44 @@ export class ProtonSession {
         isShared: !!n.isShared,
         isSharedPublicly: !!n.isSharedPublicly,
         captureTime: n.photo?.captureTime ? toMillis(n.photo.captureTime) : null,
+        coverUid: n.album?.coverPhotoNodeUid ?? null,
+        photoCount: n.album?.photoCount ?? null,
+        lastActivityTime: n.album?.lastActivityTime ? toMillis(n.album.lastActivityTime) : null,
       });
     }
     return out;
+  }
+
+  // ---- Sharing a node out (SDK: getSharingInfo / shareNode / unshareNode) ----
+
+  async getSharingInfo(uid: string): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return readSharingInfo(this.photos, uid);
+  }
+
+  async setPublicLink(uid: string, options?: PublicLinkOptions): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runSetPublicLink(this.photos, uid, options);
+  }
+
+  async removePublicLink(uid: string): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runRemovePublicLink(this.photos, uid);
+  }
+
+  async invitePeople(uid: string, emails: string[], role: string): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runInvitePeople(this.photos, uid, emails, role);
+  }
+
+  async removePerson(uid: string, email: string): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runRemovePerson(this.photos, uid, email);
+  }
+
+  async stopSharing(uid: string): Promise<SharingInfo> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runStopSharing(this.photos, uid);
   }
 
   // ---- Search index ----
@@ -952,7 +959,7 @@ export class ProtonSession {
     // search never re-indexes the whole library on later sessions.
     for (const uid of uids) {
       const cached = metaGet(uid);
-      if (cached) out.push({ uid, name: cached.name, mediaType: cached.mediaType });
+      if (cached) out.push({ uid, name: cached.name, mediaType: cached.mediaType, size: cached.size ?? null });
       else missing.push(uid);
     }
     if (missing.length === 0) return out;
@@ -961,18 +968,65 @@ export class ProtonSession {
       const n = node as any;
       if (n.missingUid) continue; // node vanished server-side
       const meta = { name: nodeName(n), mediaType: n.mediaType ?? null };
-      metaPut(n.uid, meta);
-      out.push({ uid: n.uid, name: meta.name, mediaType: meta.mediaType });
+      // This decrypt already holds the revision, so record its claimed size next to the
+      // name: the Explorer mount needs exactly that size and can then skip a second fetch
+      // for this node. Only a positive size is stored, and it is the exact cloud
+      // claimedSize the reconcile guard checks — a node without one stays size-less.
+      // The video length comes off the same revision, so the grid's pill costs nothing
+      // extra for any photo search has already indexed.
+      const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+      const size = Number(revision?.claimedSize ?? 0);
+      const durationMs = nodeDurationMs(n) ?? 0;
+      metaPut(n.uid, size > 0 ? { ...meta, size, durationMs } : { ...meta, durationMs });
+      // The size travels with the name because the viewer's contents list shows both,
+      // and it is already in hand here: fetching it separately would mean a second
+      // decrypt of a revision this loop has already opened.
+      out.push({ uid: n.uid, name: meta.name, mediaType: meta.mediaType, size: size > 0 ? size : null });
     }
     return out;
   }
 
+  /**
+   * Media types, for telling a video from a photo. Cache-first and batched, so a
+   * screenful costs one call and most of it is answered from disk with no lookup.
+   *
+   * The grid and the viewer both branch on this rather than on the Videos tag, because a
+   * file uploaded by a client that set no tag has none and would otherwise be treated as
+   * a still for good.
+   */
+  async getMediaTypes(uids: string[]): Promise<{ uid: string; mediaType: string | null }[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    const resolved = await resolveMediaTypesBatch(this.photos, uids);
+    return [...resolved].map(([uid, mediaType]) => ({ uid, mediaType }));
+  }
+
+  /**
+   * Video lengths in milliseconds, for the grid's duration pill. Cache-first, and
+   * one lookup for whatever is left, so a screenful of videos costs a single call
+   * rather than one per tile. Only the videos that have a length come back.
+   */
+  async getDurations(uids: string[]): Promise<{ uid: string; durationMs: number }[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    const resolved = await resolveDurationsBatch(this.photos, uids);
+    return [...resolved].map(([uid, durationMs]) => ({ uid, durationMs }));
+  }
+
   // ---- Upload ----
 
-  /** Kicks the job off and returns at once; the UI polls `uploadStatus`. */
-  startUpload(paths: string[]): { started: boolean } {
+  /**
+   * Kicks the job off and returns at once; the UI polls `uploadStatus`.
+   *
+   * `frames` is the host's staged picture of each file sharp cannot open, keyed by path,
+   * and is how a video reaches Proton with a thumbnail. `media` is what the host asked
+   * Windows about those same files, and is how a video reaches Proton with a length.
+   */
+  startUpload(
+    paths: string[],
+    frames: Record<string, string> = {},
+    media: Record<string, ShellMediaInfo> = {},
+  ): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runUpload(this.photos, paths);
+    runUpload(this.photos, paths, frames, media);
     return { started: true };
   }
 
@@ -990,7 +1044,7 @@ export class ProtonSession {
     return { cleared: true };
   }
 
-  // ---- Single-photo actions (SDK: getNode / renameNode / trashNodes) ----
+  // ---- Single-photo actions (SDK: getNode / renameNode / trashNodes / updatePhotos) ----
 
   /** Everything the details panel shows. Size and hashes live on the revision. */
   async getNodeDetails(uid: string): Promise<Record<string, unknown>> {
@@ -1032,6 +1086,55 @@ export class ProtonSession {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; ok: boolean; error?: string }[] = [];
     for await (const r of this.photos.trashNodes(uids)) {
+      const result = r as any;
+      out.push(
+        result.ok
+          ? { uid: result.uid, ok: true }
+          : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
+      );
+    }
+    return out;
+  }
+
+  // ---- Trash (SDK: iterateTrashedNodeUids / restoreNodes / deleteNodes / emptyTrash) ----
+
+  async listTrashed(): Promise<TrashItem[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return readTrash(this.photos);
+  }
+
+  async restorePhotos(uids: string[]): Promise<TrashResult[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runRestore(this.photos, uids);
+  }
+
+  async deletePhotosForever(uids: string[]): Promise<TrashResult[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runDeleteForever(this.photos, uids);
+  }
+
+  async emptyTrash(): Promise<{ emptied: boolean }> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runEmptyTrash(this.photos);
+  }
+
+  /**
+   * Sets or clears the Favorite tag on photos, reporting per-node results like
+   * `trashPhotos`. Favouriting a photo that lives only in an album also moves it
+   * into the timeline (an SDK-side effect); the photo stays in the album.
+   */
+  async setFavorite(
+    uids: string[],
+    favorite: boolean,
+  ): Promise<{ uid: string; ok: boolean; error?: string }[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    const updates = uids.map((uid) => ({
+      nodeUid: uid,
+      tagsToAdd: favorite ? [PhotoTag.Favorites] : [],
+      tagsToRemove: favorite ? [] : [PhotoTag.Favorites],
+    }));
+    const out: { uid: string; ok: boolean; error?: string }[] = [];
+    for await (const r of this.photos.updatePhotos(updates)) {
       const result = r as any;
       out.push(
         result.ok

@@ -1,3 +1,23 @@
+# Photos for Proton
+# Copyright (C) 2026 Akoos <https://akoos.eu>
+#
+# Source:  https://github.com/PhotosforProton/photos-desktop
+# Website: https://www.photosforproton.eu
+#
+# This file is part of Photos for Proton.
+#
+# Photos for Proton is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3 as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Build the custom Photos for Proton installer (a self-contained setup.exe that
 # carries the whole app as an embedded zip). Output: Photos-for-Proton-Setup.exe
 $repo      = $PSScriptRoot
@@ -20,13 +40,36 @@ Set-Location $app
 npm run tauri build -- --no-bundle
 Check "main app build"
 
-# 2. Assemble the payload: app.exe + sidecar.exe + sidecar/.
+# 2. Assemble the payload: the app + sidecar.exe + sidecar/ + the licence texts.
+# The staged name is the one every install ends up carrying, so it has to match the
+# APP_EXE the installer and the app agree on (app/src-tauri/src/file_assoc.rs).
 Step "2/4 assemble payload"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$stage\resources\sidecar" | Out-Null
-Copy-Item "$appTauri\target\release\app.exe" "$stage\app.exe" -Force
+Copy-Item "$appTauri\target\release\photosforproton.exe" "$stage\photosforproton.exe" -Force
 Copy-Item $binexe "$stage\resources\sidecar.exe" -Force
 Copy-Item "$sidecar\build\*" "$stage\resources\sidecar\" -Recurse -Force
+
+# Every source file promises the user received a copy of the GPL, and the MIT and
+# LGPL components shipped in the payload require their notices to travel with the
+# binary, so both texts go in beside it.
+Copy-Item "$repo\LICENSE" "$stage\LICENSE" -Force
+Copy-Item "$repo\THIRD-PARTY-NOTICES.txt" "$stage\THIRD-PARTY-NOTICES.txt" -Force
+
+# resources\sidecar.exe is a verbatim copy of node.exe, so Node's own licence has
+# to travel with it. That file also carries the V8, OpenSSL and ICU notices. The
+# repo copy comes first: a Windows Node install does not ship the text, so relying
+# on the machine would make the payload depend on who built it.
+$nodeLicense = "$repo\NODE-LICENSE.txt"
+if (-not (Test-Path $nodeLicense)) {
+  $nodeLicense = Join-Path (Split-Path (Get-Command node).Source) "LICENSE"
+}
+if (Test-Path $nodeLicense) {
+  Copy-Item $nodeLicense "$stage\NODE-LICENSE.txt" -Force
+} else {
+  Write-Host "WARNING: no Node licence text found, so NODE-LICENSE.txt is not in this payload."
+  Write-Host "         Fetch it from https://github.com/nodejs/node/blob/$((node --version))/LICENSE"
+}
 
 # 3. Zip it (deflate; the installer reads it with the `zip` crate).
 Step "3/4 zip payload"
